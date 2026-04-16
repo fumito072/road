@@ -1,0 +1,113 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String   @id @default(cuid())
+  firebaseUid    String   @unique
+  email          String
+  displayName    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  uploads Upload[]
+
+  @@map("users")
+}
+
+model Tab {
+  id                     String   @id @default(cuid())
+  name                   String
+  order                  Int      @default(0)
+  isDefault              Boolean  @default(false)
+  isActive               Boolean  @default(true)
+  icon                   String?
+  ocrPromptTemplate      String?  @db.Text
+  workflowPromptTemplate String?  @db.Text
+  sharepointSiteId       String?
+  sharepointDriveId      String?
+  sharepointFolderPath   String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  uploads     Upload[]
+  namingRules NamingRule[]
+
+  @@map("tabs")
+}
+
+model NamingRule {
+  id           String   @id @default(cuid())
+  tabId        String
+  documentType String
+  pattern      String
+  description  String?  @db.Text
+  priority     Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tab Tab @relation(fields: [tabId], references: [id], onDelete: Cascade)
+
+  @@index([tabId])
+  @@map("naming_rules")
+}
+
+enum UploadStatus {
+  PENDING
+  OCR_PROCESSING
+  OCR_DONE
+  CONFIRMED
+  UPLOADING_SHAREPOINT
+  COMPLETED
+  ERROR
+}
+
+model Upload {
+  id                       String       @id @default(cuid())
+  tabId                    String
+  userId                   String
+  folderName               String
+  contractNumber           String?
+  customerName             String?
+  applicationNumber        String?
+  status                   UploadStatus @default(PENDING)
+  sharepointDestinationPath String?
+  sharepointItemId         String?
+  sharepointWebUrl         String?
+  ocrRawResponse           Json?
+  ocrStructuredResult      Json?
+  ocrConfidence            Float?
+  needsReview              Boolean      @default(false)
+  confirmedAt              DateTime?
+  createdAt                DateTime     @default(now())
+  updatedAt                DateTime     @updatedAt
+
+  tab   Tab          @relation(fields: [tabId], references: [id])
+  user  User         @relation(fields: [userId], references: [id])
+  files UploadFile[]
+
+  @@index([tabId])
+  @@index([userId])
+  @@index([status])
+  @@map("uploads")
+}
+
+model UploadFile {
+  id               String   @id @default(cuid())
+  uploadId         String
+  originalFileName String
+  mimeType         String
+  sizeBytes        Int
+  storagePath      String
+  createdAt        DateTime @default(now())
+
+  upload Upload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+
+  @@index([uploadId])
+  @@map("upload_files")
+}

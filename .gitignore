@@ -1,10 +1,16 @@
 node_modules
 .next
 out
+dist
 coverage
 .DS_Store
-.env*
+.env
+.env.local
+.env.*.local
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+.venv
+backend/runtime-uploads/
+backend/dist/

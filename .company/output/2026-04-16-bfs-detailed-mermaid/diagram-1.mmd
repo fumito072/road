@@ -1,0 +1,28 @@
+---
+title: OCR業務フロー 詳細版（読み方選択 -> 顧客確定 -> 顧客配下BFS）
+---
+flowchart TD
+    Start([開始]) --> TabSelect[業務タブ選択]
+    TabSelect --> RuleLoad[業務タブに紐づく命名規則を読み込み]
+    RuleLoad --> Upload[対象ファイルアップロード]
+    Upload --> OcrRun[OCR実行]
+    OcrRun --> Extract[顧客名 契約ID 書類種別を取得]
+    Extract --> BuildNames[出力ファイル候補生成]
+    BuildNames --> KanaUI[顧客名の読み方候補を UI に表示]
+    KanaUI --> UserPickKana[ユーザーが読み方を選択]
+    UserPickKana --> CustomerUI[顧客名候補を UI に表示]
+    CustomerUI --> UserPickCustomer[ユーザーが顧客名を選択して確定]
+    UserPickCustomer --> BFS[確定した顧客名配下を BFS 探索]
+    BFS --> CheckTab{選択した業務タブが存在するか}
+    CheckTab -- ある --> ExistingTab[業務タブ配下の候補パスを全件取得]
+    CheckTab -- ない --> NewTabPlan[顧客フォルダ配下に業務タブ新規作成案]
+    ExistingTab --> PathUI[候補パス一覧を UI に表示]
+    PathUI --> UserPickPath[ユーザーが配置先パスを指定]
+    NewTabPlan --> NewPathUI[新規作成パスを UI に表示]
+    NewPathUI --> UserApproveNewPath[ユーザーが新規作成案を確認]
+    UserPickPath --> UploadConfirm[アップロード確認ボタン]
+    UserApproveNewPath --> UploadConfirm
+    UploadConfirm --> UploadExec[アップロード]
+    UploadExec --> Finish[完了表示]
+
+    Finish --> End([終了])

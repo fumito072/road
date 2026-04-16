@@ -1,0 +1,17 @@
+body {
+  font-family: "Hiragino Sans", "Yu Gothic", sans-serif;
+  line-height: 1.5;
+  padding: 24px;
+}
+
+h1, h2 {
+  page-break-after: avoid;
+}
+
+img {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 12px 0 28px;
+  page-break-inside: avoid;
+}
