@@ -3,7 +3,9 @@ import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 
 async function bootstrap() {
+  console.log('[boot] starting bootstrap');
   const app = await NestFactory.create(AppModule);
+  console.log('[boot] NestFactory.create done');
 
   app.setGlobalPrefix('api');
   app.enableCors({
@@ -12,9 +14,12 @@ async function bootstrap() {
   });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
-  const port = process.env.PORT ?? 3001;
-  await app.listen(port);
+  const port = Number(process.env.PORT ?? 3001);
+  await app.listen(port, '0.0.0.0');
   console.log(`ROAD Backend running on port ${port}`);
 }
 
-bootstrap();
+bootstrap().catch((err) => {
+  console.error('[boot] bootstrap failed:', err);
+  process.exit(1);
+});
