@@ -9,11 +9,12 @@ RUN npm install
 COPY tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY src ./src/
 
-RUN npx prisma generate
-RUN npx nest build
+# Bust cache on every deploy
+ARG CACHEBUST=1
+RUN npx prisma generate && npx nest build
 
 # Verify dist was created
-RUN ls -la dist/
+RUN ls -la dist/ && test -f dist/main.js
 
 # ---- Production ----
 FROM node:22-alpine
