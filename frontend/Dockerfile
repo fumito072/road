@@ -12,7 +12,9 @@ COPY . .
 
 # Bake public build-time env vars (Next.js inlines NEXT_PUBLIC_* at build)
 ARG NEXT_PUBLIC_API_URL
+RUN test -n "$NEXT_PUBLIC_API_URL" || (echo "ERROR: NEXT_PUBLIC_API_URL build arg is empty or not set" && exit 1)
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+RUN echo "Building with NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL"
 
 RUN npm run build
 
