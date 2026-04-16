@@ -1,6 +1,10 @@
 # ---- Build ----
-FROM node:22-alpine AS builder
+FROM node:22-bookworm-slim AS builder
 WORKDIR /app
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends openssl ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
 
 COPY package.json ./
 COPY prisma ./prisma/
@@ -17,8 +21,12 @@ RUN npx prisma generate && npx nest build
 RUN ls -la dist/ && test -f dist/main.js
 
 # ---- Production ----
-FROM node:22-alpine
+FROM node:22-bookworm-slim
 WORKDIR /app
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends openssl ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
 
 COPY package.json ./
 RUN npm install --omit=dev
