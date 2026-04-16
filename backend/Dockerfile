@@ -12,6 +12,9 @@ COPY src ./src/
 RUN npx prisma generate
 RUN npx nest build
 
+# Verify dist was created
+RUN ls -la dist/
+
 # ---- Production ----
 FROM node:22-alpine
 WORKDIR /app
@@ -19,10 +22,17 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 
-COPY --from=builder /app/dist ./dist
+# Copy prisma schema + generated client
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 COPY prisma ./prisma/
+
+# Copy built app
+COPY --from=builder /app/dist ./dist
+
+# Verify dist exists in final image
+RUN ls -la dist/
 
 EXPOSE 3001
 
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main"]
+CMD ["node", "dist/main"]
