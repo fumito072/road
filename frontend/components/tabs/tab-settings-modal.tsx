@@ -332,7 +332,7 @@ export function TabSettingsModal({
                   placeholder="例: ROAD-OCR/モバイル"
                 />
                 <p className="mt-1 text-xs text-slate-500">
-                  この配下に「クライアント名/契約ID」フォルダが自動生成されます
+                  この配下に「顧客名/契約ID」フォルダが自動生成されます
                 </p>
               </div>
             </div>
