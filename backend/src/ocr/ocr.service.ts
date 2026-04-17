@@ -138,22 +138,29 @@ export class OcrService {
   private buildNamingRulesSection(
     rules?: Array<{ documentType: string; pattern: string; description?: string | null }>,
   ): string {
+    const baseRule = [
+      'File naming rule (STRICT): outputFileName MUST follow the pattern "{date}_{customerName}_{documentType}.pdf".',
+      '{date} is today in YYYYMMDD format. Replace sanitization characters (\\ / : * ? " < > | whitespace) with underscores.',
+      'Do not include contractNumber, index, or the original extension. Always use the .pdf suffix.',
+    ];
+
     if (!rules || rules.length === 0) {
-      return 'For each file, generate outputFileName according to the inferred naming rule. If no explicit rule exists, use customer_contract_documentType_index.ext.';
+      return [
+        ...baseRule,
+        'Classify each file into documentType based on its content (e.g. 契約書, 請求書, 申込書, 領収書, その他).',
+      ].join('\n');
     }
 
     const ruleLines = rules.map((rule, index) => {
       const desc = rule.description ? ` (${rule.description})` : '';
-      return `  ${index + 1}. documentType="${rule.documentType}"${desc} → outputFileName pattern: "${rule.pattern}"`;
+      return `  ${index + 1}. documentType="${rule.documentType}"${desc}`;
     });
 
     return [
-      'IMPORTANT: Use the following naming rules to classify each file and generate outputFileName.',
-      'Match each file to the most appropriate documentType based on its content.',
-      'Replace placeholders in the pattern: {customerName}, {contractNumber}, {applicationNumber}, {documentType}, {index}, {date} (YYYYMMDD).',
-      'Naming rules:',
+      ...baseRule,
+      'Allowed documentType values (match the file content to the most appropriate one):',
       ...ruleLines,
-      'If a file does not match any rule, use documentType="その他" and the pattern: {customerName}_{contractNumber}_その他_{index}.ext',
+      'If none match, use documentType="その他".',
     ].join('\n');
   }
 
@@ -200,9 +207,7 @@ export class OcrService {
     const fileResults = files.map((file, index) => {
       const candidate = (rawFileResults[index] ?? {}) as Record<string, unknown>;
       const documentType = this.asString(candidate.documentType) ?? '書類';
-      const outputFileName =
-        this.asString(candidate.outputFileName) ??
-        this.buildFallbackFileName(customerName, contractNumber, documentType, file.originalFileName, index);
+      const outputFileName = this.buildStandardFileName(customerName, documentType);
       const confidence = this.asNumber(candidate.confidence) ?? 0.6;
 
       return {
@@ -235,20 +240,15 @@ export class OcrService {
     };
   }
 
-  private buildFallbackFileName(
-    customerName: string,
-    contractNumber: string,
-    documentType: string,
-    originalFileName: string,
-    index: number,
-  ) {
-    const extension = originalFileName.includes('.') ? originalFileName.slice(originalFileName.lastIndexOf('.')) : '.bin';
-    const safe = [customerName, contractNumber, documentType, String(index + 1).padStart(2, '0')]
+  private buildStandardFileName(customerName: string, documentType: string) {
+    const now = new Date();
+    const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
+    const safe = [date, customerName, documentType]
       .map((segment) => segment.replace(/[\\/:*?"<>|\s]+/g, '_'))
       .filter(Boolean)
       .join('_');
 
-    return `${safe}${extension}`;
+    return `${safe}.pdf`;
   }
 
   private asString(value: unknown) {
