@@ -143,6 +143,7 @@ export function OcrUploadWorkbench() {
   const [newFolderPlan, setNewFolderPlan] = useState<string[]>([]);
   const [resolveWarnings, setResolveWarnings] = useState<string[]>([]);
   const [isResolvingDestination, setIsResolvingDestination] = useState(false);
+  const [previewFile, setPreviewFile] = useState<{ uploadId: string; fileId: string; name: string; mimeType: string } | null>(null);
 
   const completedCount = useMemo(
     () => uploads.filter((upload) => upload.status === "COMPLETED").length,
@@ -731,21 +732,39 @@ export function OcrUploadWorkbench() {
                           <p className="text-sm font-semibold text-[#334154]">3. アップロードファイル名の編集</p>
                           <p className="mt-1 text-xs text-[#7c8795]">SharePoint に保存する際のファイル名を変更できます。確定前に必要に応じて修正してください。</p>
                         </div>
-                        {editableFileResults.map((file, index) => (
-                          <div key={file.originalFileName} className="rounded-sm border border-[#e5ebf1] bg-white p-4">
-                            <p className="text-xs text-[#7c8795]">元ファイル: {file.originalFileName}</p>
-                            <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                              <div>
-                                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">書類種別</label>
-                                <input type="text" value={file.documentType} onChange={(event) => setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, documentType: event.target.value } : item))} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
-                              </div>
-                              <div>
-                                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">保存ファイル名</label>
-                                <input type="text" value={file.outputFileName} onChange={(event) => setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, outputFileName: event.target.value } : item))} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
+                        {editableFileResults.map((file, index) => {
+                          const sourceFile = currentUpload?.files.find((item) => item.originalFileName === file.originalFileName);
+                          return (
+                            <div key={file.originalFileName} className="rounded-sm border border-[#e5ebf1] bg-white p-4">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!sourceFile || !currentUpload) return;
+                                  setPreviewFile({
+                                    uploadId: currentUpload.id,
+                                    fileId: sourceFile.id,
+                                    name: sourceFile.originalFileName,
+                                    mimeType: sourceFile.mimeType,
+                                  });
+                                }}
+                                disabled={!sourceFile}
+                                className="text-xs text-[#127780] underline decoration-dotted underline-offset-4 hover:text-[#0e5a63] disabled:cursor-not-allowed disabled:text-[#7c8795] disabled:no-underline"
+                              >
+                                元ファイル: {file.originalFileName}
+                              </button>
+                              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                                <div>
+                                  <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">書類種別</label>
+                                  <input type="text" value={file.documentType} onChange={(event) => setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, documentType: event.target.value } : item))} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
+                                </div>
+                                <div>
+                                  <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">保存ファイル名</label>
+                                  <input type="text" value={file.outputFileName} onChange={(event) => setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, outputFileName: event.target.value } : item))} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
 
                       <div className="space-y-4 rounded-sm border border-[#e5ebf1] bg-[#fbfcfe] p-4">
@@ -820,6 +839,72 @@ export function OcrUploadWorkbench() {
           onSaved={handleSaved}
         />
       )}
+
+      {previewFile && (
+        <FilePreviewModal
+          uploadId={previewFile.uploadId}
+          fileId={previewFile.fileId}
+          name={previewFile.name}
+          mimeType={previewFile.mimeType}
+          onClose={() => setPreviewFile(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function FilePreviewModal({
+  uploadId,
+  fileId,
+  name,
+  mimeType,
+  onClose,
+}: {
+  uploadId: string;
+  fileId: string;
+  name: string;
+  mimeType: string;
+  onClose: () => void;
+}) {
+  const src = `/api/uploads/${uploadId}/files/${fileId}/preview`;
+  const isImage = mimeType.startsWith("image/");
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="flex h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-sm bg-white shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-[#e5ebf1] bg-[#f6f8fb] px-5 py-3">
+          <p className="truncate text-sm font-semibold text-[#1f2b37]">{name}</p>
+          <div className="flex items-center gap-3">
+            <a
+              href={src}
+              download={name}
+              className="text-xs font-medium text-[#127780] hover:underline"
+            >
+              ダウンロード
+            </a>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-sm border border-[#d5dee8] bg-white px-3 py-1 text-xs font-medium text-[#445063] hover:border-[#44cfd8]"
+            >
+              閉じる
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-auto bg-[#eef2f7]">
+          {isImage ? (
+            <img src={src} alt={name} className="mx-auto max-h-full max-w-full object-contain" />
+          ) : (
+            <iframe src={src} title={name} className="h-full w-full" />
+          )}
+        </div>
+      </div>
     </div>
   );
 }

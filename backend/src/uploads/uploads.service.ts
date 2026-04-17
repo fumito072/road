@@ -5,8 +5,9 @@ import { SharepointFolderEntry, SharepointService } from '../sharepoint/sharepoi
 import { NamingRulesService } from '../naming-rules/naming-rules.service';
 import { CreateUploadDto, ConfirmUploadDto, IntakeUploadDto, ResolveUploadDto } from './uploads.dto';
 import { UploadStatus, Prisma } from '@prisma/client';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import * as admin from 'firebase-admin';
 
 type UploadedFile = {
   originalname: string;
@@ -834,5 +835,45 @@ export class UploadsService {
       // Fall through to return rawName as-is
     }
     return rawName;
+  }
+
+  async loadFileForPreview(uploadId: string, fileId: string, userId: string) {
+    const upload = await this.findOne(uploadId, userId);
+    const file = upload.files.find((item) => item.id === fileId);
+
+    if (!file) {
+      throw new NotFoundException('File not found');
+    }
+
+    const buffer = await this.loadStorageBuffer(file.storagePath);
+    return {
+      buffer,
+      mimeType: file.mimeType ?? 'application/octet-stream',
+      fileName: file.originalFileName,
+    };
+  }
+
+  private async loadStorageBuffer(storagePath: string): Promise<Buffer> {
+    if (!storagePath) {
+      throw new NotFoundException('storagePath is empty');
+    }
+
+    if (storagePath.startsWith('http://') || storagePath.startsWith('https://')) {
+      const response = await fetch(storagePath);
+      if (!response.ok) {
+        throw new NotFoundException(`Failed to download file from URL: ${storagePath}`);
+      }
+      return Buffer.from(await response.arrayBuffer());
+    }
+
+    if (storagePath.startsWith('gs://')) {
+      const withoutScheme = storagePath.replace('gs://', '');
+      const [bucketName, ...rest] = withoutScheme.split('/');
+      const filePath = rest.join('/');
+      const [buffer] = await admin.storage().bucket(bucketName).file(filePath).download();
+      return buffer;
+    }
+
+    return readFile(storagePath);
   }
 }
