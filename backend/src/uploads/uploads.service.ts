@@ -68,8 +68,8 @@ const BUSINESS_FOLDER_ALIASES: Record<string, string[]> = {
   '酒井（領収書）': ['酒井（領収証）', '酒井（領収書）'],
 };
 
-const MAX_DESTINATION_CANDIDATES = 120;
-const MAX_BFS_DEPTH = 3;
+const MAX_DESTINATION_CANDIDATES = 60;
+const MAX_BFS_DEPTH = 2;
 const FOLDER_CACHE_TTL_MS = 5 * 60 * 1000;
 
 type CachedFolderList = {
@@ -436,28 +436,37 @@ export class UploadsService {
 
   private async findBusinessFolders(upload: Awaited<ReturnType<UploadsService['findOne']>>, customerFolderPath: string) {
     const aliases = this.getBusinessFolderAliases(upload.tab.name);
-    const queue: Array<{ path: string; depth: number }> = [{ path: customerFolderPath, depth: 0 }];
     const visited = new Set<string>();
     const matches: SharepointFolderEntry[] = [];
+    let currentLevel: Array<{ path: string; depth: number }> = [{ path: customerFolderPath, depth: 0 }];
 
-    while (queue.length > 0 && visited.size < MAX_DESTINATION_CANDIDATES) {
-      const { path: currentPath, depth } = queue.shift()!;
+    while (currentLevel.length > 0 && visited.size < MAX_DESTINATION_CANDIDATES) {
+      const toExpand = currentLevel.filter((entry) => {
+        if (visited.has(entry.path)) return false;
+        visited.add(entry.path);
+        return true;
+      });
 
-      if (visited.has(currentPath)) {
-        continue;
-      }
-      visited.add(currentPath);
+      if (toExpand.length === 0) break;
 
-      const children = await this.cachedListFolders(upload, currentPath);
+      const childrenBatches = await Promise.all(
+        toExpand.map((entry) =>
+          this.cachedListFolders(upload, entry.path).then((children) => ({ entry, children })),
+        ),
+      );
 
-      for (const child of children) {
-        if (aliases.includes(child.name)) {
-          matches.push(child);
+      const nextLevel: Array<{ path: string; depth: number }> = [];
+      for (const { entry, children } of childrenBatches) {
+        for (const child of children) {
+          if (aliases.includes(child.name)) {
+            matches.push(child);
+          }
+          if (!visited.has(child.path) && entry.depth + 1 < MAX_BFS_DEPTH) {
+            nextLevel.push({ path: child.path, depth: entry.depth + 1 });
+          }
         }
-        if (!visited.has(child.path) && depth + 1 < MAX_BFS_DEPTH) {
-          queue.push({ path: child.path, depth: depth + 1 });
-        }
       }
+      currentLevel = nextLevel;
     }
 
     return matches;
@@ -468,36 +477,56 @@ export class UploadsService {
     businessFolders: SharepointFolderEntry[],
     warnings: string[],
   ): Promise<DestinationCandidate[]> {
-    const queue: Array<{ path: string; depth: number }> = businessFolders.map((folder) => ({ path: folder.path, depth: 0 }));
     const visited = new Set<string>();
     const candidates: DestinationCandidate[] = [];
+    let currentLevel: Array<{ path: string; depth: number }> = businessFolders.map((folder) => ({
+      path: folder.path,
+      depth: 0,
+    }));
 
-    while (queue.length > 0 && candidates.length < MAX_DESTINATION_CANDIDATES) {
-      const { path: currentPath, depth } = queue.shift()!;
+    while (currentLevel.length > 0 && candidates.length < MAX_DESTINATION_CANDIDATES) {
+      const expandable: Array<{ path: string; depth: number }> = [];
 
-      if (visited.has(currentPath)) {
-        continue;
+      for (const entry of currentLevel) {
+        if (candidates.length >= MAX_DESTINATION_CANDIDATES) {
+          break;
+        }
+        if (visited.has(entry.path)) {
+          continue;
+        }
+        visited.add(entry.path);
+        candidates.push({
+          absolutePath: entry.path,
+          exists: true,
+          reason: '顧客配下で見つかった既存フォルダです。',
+        });
+        if (entry.depth + 1 < MAX_BFS_DEPTH) {
+          expandable.push(entry);
+        }
       }
-      visited.add(currentPath);
 
-      candidates.push({
-        absolutePath: currentPath,
-        exists: true,
-        reason: '顧客配下で見つかった既存フォルダです。',
-      });
+      if (expandable.length === 0) {
+        break;
+      }
 
-      if (depth + 1 < MAX_BFS_DEPTH) {
-        const children = await this.cachedListFolders(upload, currentPath);
+      const childrenBatches = await Promise.all(
+        expandable.map((entry) =>
+          this.cachedListFolders(upload, entry.path).then((children) => ({ entry, children })),
+        ),
+      );
 
+      const nextLevel: Array<{ path: string; depth: number }> = [];
+      for (const { entry, children } of childrenBatches) {
         for (const child of children) {
           if (!visited.has(child.path)) {
-            queue.push({ path: child.path, depth: depth + 1 });
+            nextLevel.push({ path: child.path, depth: entry.depth + 1 });
           }
         }
       }
+      currentLevel = nextLevel;
     }
 
-    if (queue.length > 0) {
+    if (candidates.length >= MAX_DESTINATION_CANDIDATES) {
       warnings.push('候補パス数が多いため、一部のみ表示しています。');
     }
 
