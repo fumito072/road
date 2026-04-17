@@ -4,32 +4,32 @@ import { CreateTabDto, UpdateTabDto } from './tabs.dto';
 
 const defaultTabs = [
   {
-    name: 'モバイル',
+    name: 'コラボ',
     order: 0,
     isDefault: true,
     isActive: true,
-    icon: 'smartphone',
-  },
-  {
-    name: '電力',
-    order: 1,
-    isDefault: true,
-    isActive: true,
-    icon: 'zap',
+    icon: 'users',
   },
   {
     name: 'リース・現金',
-    order: 2,
+    order: 1,
     isDefault: true,
     isActive: true,
     icon: 'banknote',
   },
   {
-    name: 'コラボ',
+    name: '電力',
+    order: 2,
+    isDefault: true,
+    isActive: true,
+    icon: 'zap',
+  },
+  {
+    name: 'モバイル',
     order: 3,
     isDefault: true,
     isActive: true,
-    icon: 'users',
+    icon: 'smartphone',
   },
   {
     name: '酒井（領収書）',
