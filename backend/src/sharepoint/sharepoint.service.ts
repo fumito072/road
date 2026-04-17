@@ -30,6 +30,8 @@ type SharepointItem = {
 export class SharepointService {
   private readonly logger = new Logger(SharepointService.name);
 
+  private tokenCache: { value: string; expiresAt: number } | null = null;
+
   constructor(private readonly config: ConfigService) {}
 
   /**
@@ -135,6 +137,10 @@ export class SharepointService {
   }
 
   private async getAccessToken(): Promise<string> {
+    if (this.tokenCache && this.tokenCache.expiresAt > Date.now()) {
+      return this.tokenCache.value;
+    }
+
     const tenantId = this.config.get<string>('AZURE_TENANT_ID');
     const clientId = this.config.get<string>('AZURE_CLIENT_ID');
     const clientSecret = this.config.get<string>('AZURE_CLIENT_SECRET');
@@ -159,13 +165,23 @@ export class SharepointService {
       },
     );
 
-    const json = (await response.json()) as { access_token?: string; error_description?: string };
+    const json = (await response.json()) as {
+      access_token?: string;
+      expires_in?: number;
+      error_description?: string;
+    };
 
     if (!response.ok || !json.access_token) {
       throw new InternalServerErrorException(
         `Failed to acquire Microsoft Graph access token: ${json.error_description ?? response.statusText}`,
       );
     }
+
+    const ttlSeconds = typeof json.expires_in === 'number' ? json.expires_in : 3600;
+    this.tokenCache = {
+      value: json.access_token,
+      expiresAt: Date.now() + Math.max(ttlSeconds - 60, 60) * 1000,
+    };
 
     return json.access_token;
   }
