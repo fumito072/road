@@ -122,7 +122,8 @@ export class OcrService {
         : 'Base SharePoint folder path: use the business tab name as the root folder.',
       'The uploaded files belong to a single client.',
       'Determine customerName, customerKana, contractNumber, applicationNumber, and classify each file into a documentType.',
-      'Also provide customerNameCandidates and customerKanaCandidates as short arrays ordered by confidence.',
+      'IMPORTANT: customerName must NOT include any company designator (株式会社, 有限会社, 合同会社, 医療法人, （株）, ㈱, Inc., Co., Ltd., LLC, Corp., etc.). Strip them and return only the core customer name.',
+      'Also provide customerNameCandidates and customerKanaCandidates as short arrays ordered by confidence. The candidates must also omit the company designators.',
       this.buildNamingRulesSection(context?.namingRules),
       'Do not finalize the SharePoint destination. sharepointFolderPath may be left empty if uncertain.',
       'JSON schema:',
@@ -197,11 +198,14 @@ export class OcrService {
     files: ExtractFileInput[],
     context?: OcrContext,
   ) {
-    const customerName = this.asString(parsed.customerName) ?? '確認要クライアント';
+    const rawCustomerName = this.asString(parsed.customerName) ?? '確認要クライアント';
+    const customerName = this.stripCompanyDesignators(rawCustomerName);
     const customerKana = this.asString(parsed.customerKana) ?? '';
     const contractNumber = this.asString(parsed.contractNumber) ?? '確認要契約ID';
     const applicationNumber = this.asString(parsed.applicationNumber) ?? '';
-    const customerNameCandidates = this.normalizeStringArray(parsed.customerNameCandidates, customerName);
+    const customerNameCandidates = this.normalizeStringArray(parsed.customerNameCandidates, customerName)
+      .map((name) => this.stripCompanyDesignators(name))
+      .filter((name, index, arr) => name && arr.indexOf(name) === index);
     const customerKanaCandidates = this.normalizeStringArray(parsed.customerKanaCandidates, customerKana);
     const rawFileResults = Array.isArray(parsed.fileResults) ? parsed.fileResults : [];
     const fileResults = files.map((file, index) => {
@@ -238,6 +242,18 @@ export class OcrService {
       confidence,
       fileResults,
     };
+  }
+
+  private stripCompanyDesignators(value: string) {
+    if (!value) return value;
+    const trimmed = value
+      .replace(
+        /株式会社|有限会社|合同会社|合資会社|合名会社|医療法人|社会福祉法人|一般社団法人|一般財団法人|（株）|\(株\)|㈱|Inc\.?|Co\.?Ltd\.?|LLC|Ltd\.?|Corp\.?/gi,
+        '',
+      )
+      .replace(/\s+/g, ' ')
+      .trim();
+    return trimmed || value.trim();
   }
 
   private buildStandardFileName(customerName: string, documentType: string) {

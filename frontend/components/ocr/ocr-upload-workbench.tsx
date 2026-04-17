@@ -668,7 +668,7 @@ export function OcrUploadWorkbench() {
                           <input type="text" value={customerKana} onChange={(event) => setCustomerKana(event.target.value)} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
                         </div>
                         <div>
-                          <label className="mb-1.5 block text-sm font-medium text-[#445063]">クライアント名</label>
+                          <label className="mb-1.5 block text-sm font-medium text-[#445063]">顧客名</label>
                           <input type="text" value={customerName} onChange={(event) => setCustomerName(event.target.value)} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
                         </div>
                         <div>
