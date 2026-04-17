@@ -727,8 +727,30 @@ export function OcrUploadWorkbench() {
                       </div>
 
                       <div className="space-y-4 rounded-sm border border-[#e5ebf1] bg-[#fbfcfe] p-4">
+                        <div>
+                          <p className="text-sm font-semibold text-[#334154]">3. アップロードファイル名の編集</p>
+                          <p className="mt-1 text-xs text-[#7c8795]">SharePoint に保存する際のファイル名を変更できます。確定前に必要に応じて修正してください。</p>
+                        </div>
+                        {editableFileResults.map((file, index) => (
+                          <div key={file.originalFileName} className="rounded-sm border border-[#e5ebf1] bg-white p-4">
+                            <p className="text-xs text-[#7c8795]">元ファイル: {file.originalFileName}</p>
+                            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                              <div>
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">書類種別</label>
+                                <input type="text" value={file.documentType} onChange={(event) => setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, documentType: event.target.value } : item))} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
+                              </div>
+                              <div>
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">保存ファイル名</label>
+                                <input type="text" value={file.outputFileName} onChange={(event) => setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, outputFileName: event.target.value } : item))} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="space-y-4 rounded-sm border border-[#e5ebf1] bg-[#fbfcfe] p-4">
                         <div className="flex items-center justify-between">
-                          <p className="text-sm font-semibold text-[#334154]">3. 保存先候補</p>
+                          <p className="text-sm font-semibold text-[#334154]">4. 保存先候補</p>
                           <span className="text-xs text-[#7c8795]">顧客名確定後に解決</span>
                         </div>
 
@@ -781,28 +803,6 @@ export function OcrUploadWorkbench() {
                           </a>
                         </div>
                       )}
-
-                      <div className="space-y-3">
-                        <div>
-                          <p className="font-semibold text-[#334154]">アップロードファイル名の編集</p>
-                          <p className="mt-1 text-xs text-[#7c8795]">SharePoint に保存する際のファイル名を変更できます。確定前に必要に応じて修正してください。</p>
-                        </div>
-                        {editableFileResults.map((file, index) => (
-                          <div key={file.originalFileName} className="rounded-sm border border-[#e5ebf1] bg-[#fbfcfe] p-4">
-                            <p className="text-xs text-[#7c8795]">元ファイル: {file.originalFileName}</p>
-                            <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                              <div>
-                                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">書類種別</label>
-                                <input type="text" value={file.documentType} onChange={(event) => setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, documentType: event.target.value } : item))} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
-                              </div>
-                              <div>
-                                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">保存ファイル名</label>
-                                <input type="text" value={file.outputFileName} onChange={(event) => setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, outputFileName: event.target.value } : item))} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
                     </>
                   )}
                 </div>
