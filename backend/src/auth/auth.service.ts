@@ -1,48 +1,62 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import * as admin from 'firebase-admin';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
 
+type SessionUser = {
+  id: string;
+  email: string;
+  displayName: string | null;
+};
+
 @Injectable()
-export class AuthService implements OnModuleInit {
+export class AuthService {
   constructor(
-    private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly jwt: JwtService,
   ) {}
 
-  onModuleInit() {
-    if (!admin.apps.length) {
-      admin.initializeApp({
-        projectId: this.config.get<string>('FIREBASE_PROJECT_ID'),
-      });
+  async login(email: string, password: string): Promise<{ token: string; user: SessionUser }> {
+    const normalized = email.trim().toLowerCase();
+    const user = await this.prisma.user.findUnique({ where: { email: normalized } });
+    if (!user || !user.passwordHash) {
+      throw new UnauthorizedException('メールアドレスまたはパスワードが正しくありません');
+    }
+
+    const ok = await bcrypt.compare(password, user.passwordHash);
+    if (!ok) {
+      throw new UnauthorizedException('メールアドレスまたはパスワードが正しくありません');
+    }
+
+    const token = await this.jwt.signAsync({ sub: user.id, email: user.email });
+    return {
+      token,
+      user: { id: user.id, email: user.email, displayName: user.displayName },
+    };
+  }
+
+  async verifyToken(token: string): Promise<SessionUser> {
+    try {
+      const payload = await this.jwt.verifyAsync<{ sub: string }>(token);
+      const user = await this.prisma.user.findUnique({ where: { id: payload.sub } });
+      if (!user) {
+        throw new UnauthorizedException('ユーザーが見つかりません');
+      }
+      return { id: user.id, email: user.email, displayName: user.displayName };
+    } catch {
+      throw new UnauthorizedException('セッションの有効期限が切れました。再度サインインしてください。');
     }
   }
 
-  async verifyToken(idToken: string): Promise<admin.auth.DecodedIdToken> {
-    return admin.auth().verifyIdToken(idToken);
-  }
-
-  async findOrCreateUser(decoded: admin.auth.DecodedIdToken) {
-    return this.prisma.user.upsert({
-      where: { firebaseUid: decoded.uid },
-      update: { email: decoded.email ?? '' },
-      create: {
-        firebaseUid: decoded.uid,
-        email: decoded.email ?? '',
-        displayName: decoded.name ?? null,
-      },
-    });
-  }
-
-  async getOrCreateDevUser() {
-    return this.prisma.user.upsert({
-      where: { firebaseUid: 'dev-user' },
+  async getOrCreateDevUser(): Promise<SessionUser> {
+    const user = await this.prisma.user.upsert({
+      where: { email: 'dev@localhost' },
       update: {},
       create: {
-        firebaseUid: 'dev-user',
         email: 'dev@localhost',
         displayName: 'Dev User',
       },
     });
+    return { id: user.id, email: user.email, displayName: user.displayName };
   }
 }

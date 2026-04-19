@@ -90,14 +90,26 @@ export class OcrService {
     const raw = (await response.json()) as Record<string, unknown>;
 
     if (!response.ok) {
+      this.logger.error(
+        `Gemini OCR request failed (status=${response.status}): ${JSON.stringify(raw)}`,
+      );
       throw new InternalServerErrorException(
-        `Gemini OCR request failed: ${JSON.stringify(raw)}`,
+        'OCR処理でエラーが発生しました。しばらく待ってから再実行してください。',
       );
     }
 
-    const text = this.extractText(raw);
-    const parsed = this.parseStructuredJson(text);
-    const normalized = this.normalizeStructuredResult(parsed, files, context);
+    let text: string;
+    let parsed: Record<string, unknown>;
+    try {
+      text = this.extractText(raw);
+      parsed = this.parseStructuredJson(text);
+    } catch (err) {
+      this.logger.error('Failed to parse Gemini OCR response', err as Error);
+      throw new InternalServerErrorException(
+        'OCR応答の解析に失敗しました。ファイルを確認して再実行してください。',
+      );
+    }
+    const normalized = this.normalizeStructuredResult(parsed, files);
 
     return {
       raw,
@@ -124,10 +136,11 @@ export class OcrService {
       'Determine customerName, customerKana, contractNumber, applicationNumber, and classify each file into a documentType.',
       'IMPORTANT: customerName must NOT include any company designator (株式会社, 有限会社, 合同会社, 医療法人, （株）, ㈱, Inc., Co., Ltd., LLC, Corp., etc.). Strip them and return only the core customer name.',
       'Also provide customerNameCandidates and customerKanaCandidates as short arrays ordered by confidence. The candidates must also omit the company designators.',
+      'For each file, extract the primary date printed on the document (契約日, 申込日, 発行日, 請求日, 領収日, etc. — whichever best represents the document) and return it as documentDate in YYYYMMDD format. If the document shows 令和/平成/昭和, convert to the Gregorian year. If no date is present, return an empty string.',
       this.buildNamingRulesSection(context?.namingRules),
       'Do not finalize the SharePoint destination. sharepointFolderPath may be left empty if uncertain.',
       'JSON schema:',
-      '{"customerName":"","customerKana":"","customerNameCandidates":[""],"customerKanaCandidates":[""],"contractNumber":"","applicationNumber":"","sharepointFolderPath":"","confidence":0.0,"summary":"","fileResults":[{"originalFileName":"","documentType":"","outputFileName":"","confidence":0.0,"reason":""}]}',
+      '{"customerName":"","customerKana":"","customerNameCandidates":[""],"customerKanaCandidates":[""],"contractNumber":"","applicationNumber":"","sharepointFolderPath":"","confidence":0.0,"summary":"","fileResults":[{"originalFileName":"","documentType":"","documentDate":"","outputFileName":"","confidence":0.0,"reason":""}]}',
       'Files:',
       fileNames,
       promptTemplate?.trim() ? `Additional instructions:\n${promptTemplate.trim()}` : '',
@@ -141,7 +154,7 @@ export class OcrService {
   ): string {
     const baseRule = [
       'File naming rule (STRICT): outputFileName MUST follow the pattern "{date}_{customerName}_{documentType}.pdf".',
-      '{date} is today in YYYYMMDD format. Replace sanitization characters (\\ / : * ? " < > | whitespace) with underscores.',
+      '{date} is the documentDate extracted from that file in YYYYMMDD format. If documentDate is empty, leave the outputFileName prefix as an empty string (the server will fill in today). Replace sanitization characters (\\ / : * ? " < > | whitespace) with underscores.',
       'Do not include contractNumber, index, or the original extension. Always use the .pdf suffix.',
     ];
 
@@ -196,7 +209,6 @@ export class OcrService {
   private normalizeStructuredResult(
     parsed: Record<string, unknown>,
     files: ExtractFileInput[],
-    context?: OcrContext,
   ) {
     const rawCustomerName = this.asString(parsed.customerName) ?? '確認要クライアント';
     const customerName = this.stripCompanyDesignators(rawCustomerName);
@@ -211,12 +223,14 @@ export class OcrService {
     const fileResults = files.map((file, index) => {
       const candidate = (rawFileResults[index] ?? {}) as Record<string, unknown>;
       const documentType = this.asString(candidate.documentType) ?? '書類';
-      const outputFileName = this.buildStandardFileName(customerName, documentType);
+      const documentDate = this.normalizeDocumentDate(candidate.documentDate);
+      const outputFileName = this.buildStandardFileName(customerName, documentType, documentDate);
       const confidence = this.asNumber(candidate.confidence) ?? 0.6;
 
       return {
         originalFileName: file.originalFileName,
         documentType,
+        documentDate,
         outputFileName,
         confidence,
         reason: this.asString(candidate.reason) ?? '',
@@ -227,7 +241,6 @@ export class OcrService {
       this.asNumber(parsed.confidence) ??
       fileResults.reduce((total, item) => total + item.confidence, 0) / Math.max(fileResults.length, 1);
 
-    const baseFolder = context?.baseSharepointFolderPath?.trim() || context?.tabName || 'ocr-output';
     const sharepointFolderPath = '';
 
     return {
@@ -256,15 +269,28 @@ export class OcrService {
     return trimmed || value.trim();
   }
 
-  private buildStandardFileName(customerName: string, documentType: string) {
-    const now = new Date();
-    const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
+  private buildStandardFileName(customerName: string, documentType: string, documentDate: string) {
+    const date = documentDate || this.todayYyyymmdd();
     const safe = [date, customerName, documentType]
       .map((segment) => segment.replace(/[\\/:*?"<>|\s]+/g, '_'))
       .filter(Boolean)
       .join('_');
 
     return `${safe}.pdf`;
+  }
+
+  private todayYyyymmdd() {
+    const now = new Date();
+    return `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
+  }
+
+  private normalizeDocumentDate(value: unknown): string {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    const digits = trimmed.replace(/[^0-9]/g, '');
+    if (digits.length === 8) return digits;
+    return '';
   }
 
   private asString(value: unknown) {

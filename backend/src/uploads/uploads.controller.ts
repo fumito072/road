@@ -15,7 +15,7 @@ import { FilesInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import { UploadsService } from './uploads.service';
 import { CreateUploadDto, ConfirmUploadDto, IntakeUploadDto, ResolveUploadDto } from './uploads.dto';
-import { FirebaseAuthGuard } from '../common/guards/firebase-auth.guard';
+import { AuthGuard } from '../common/guards/auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 
 type UploadedFile = {
@@ -26,7 +26,7 @@ type UploadedFile = {
 };
 
 @Controller('uploads')
-@UseGuards(FirebaseAuthGuard)
+@UseGuards(AuthGuard)
 export class UploadsController {
   constructor(private readonly uploadsService: UploadsService) {}
 
@@ -52,7 +52,14 @@ export class UploadsController {
   }
 
   @Post('intake')
-  @UseInterceptors(FilesInterceptor('files', 50))
+  @UseInterceptors(
+    FilesInterceptor('files', 50, {
+      limits: {
+        fileSize: 25 * 1024 * 1024,
+        fieldSize: 1 * 1024 * 1024,
+      },
+    }),
+  )
   intake(
     @UploadedFiles() files: UploadedFile[],
     @Body() dto: IntakeUploadDto,

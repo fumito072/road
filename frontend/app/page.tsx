@@ -1,7 +1,12 @@
 "use client";
 
+import { AuthGate } from "@/components/auth/auth-gate";
 import { OcrUploadWorkbench } from "@/components/ocr/ocr-upload-workbench";
 
 export default function HomePage() {
-  return <OcrUploadWorkbench />;
+  return (
+    <AuthGate>
+      <OcrUploadWorkbench />
+    </AuthGate>
+  );
 }

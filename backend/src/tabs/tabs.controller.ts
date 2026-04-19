@@ -10,10 +10,10 @@ import {
 } from '@nestjs/common';
 import { TabsService } from './tabs.service';
 import { CreateTabDto, UpdateTabDto } from './tabs.dto';
-import { FirebaseAuthGuard } from '../common/guards/firebase-auth.guard';
+import { AuthGuard } from '../common/guards/auth.guard';
 
 @Controller('tabs')
-@UseGuards(FirebaseAuthGuard)
+@UseGuards(AuthGuard)
 export class TabsController {
   constructor(private readonly tabsService: TabsService) {}
 
