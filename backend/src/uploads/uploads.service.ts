@@ -20,6 +20,7 @@ type StructuredFileResult = {
   originalFileName?: string;
   outputFileName?: string;
   documentType?: string;
+  documentDate?: string;
   confidence?: number;
   reason?: string;
 };
@@ -903,6 +904,15 @@ export class UploadsService {
       return buffer;
     }
 
-    return readFile(storagePath);
+    try {
+      return await readFile(storagePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new NotFoundException(
+          '元ファイルが見つかりません。再デプロイ等でアップロード済みファイルが失われた可能性があります。',
+        );
+      }
+      throw err;
+    }
   }
 }

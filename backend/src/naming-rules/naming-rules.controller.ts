@@ -11,10 +11,10 @@ import {
 } from '@nestjs/common';
 import { NamingRulesService } from './naming-rules.service';
 import { CreateNamingRuleDto, UpdateNamingRuleDto } from './naming-rules.dto';
-import { FirebaseAuthGuard } from '../common/guards/firebase-auth.guard';
+import { AuthGuard } from '../common/guards/auth.guard';
 
 @Controller('naming-rules')
-@UseGuards(FirebaseAuthGuard)
+@UseGuards(AuthGuard)
 export class NamingRulesController {
   constructor(private readonly namingRulesService: NamingRulesService) {}
 
