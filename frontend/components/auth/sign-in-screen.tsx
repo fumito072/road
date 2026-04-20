@@ -29,7 +29,7 @@ export function SignInScreen() {
         className="w-full max-w-sm bg-white border border-[#d8e6ef] rounded-2xl shadow-sm p-8 space-y-5"
       >
         <div className="text-center space-y-2">
-          <h1 className="text-xl font-semibold text-[#1e3247]">ROAD OCR Hub</h1>
+          <h1 className="text-xl font-semibold text-[#1e3247]">LOAD OCR Hub</h1>
           <p className="text-sm text-[#4c6478]">サインインして利用してください</p>
         </div>
 

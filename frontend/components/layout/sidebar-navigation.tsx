@@ -60,7 +60,7 @@ export function SidebarNavigation({ sections }: SidebarNavigationProps) {
               Network AI Suite
             </p>
             <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">
-              ROAD OCR Hub
+              LOAD OCR Hub
             </h2>
           </div>
           <div className="rounded-2xl border border-white/15 bg-white/10 p-3 text-cyan-100">
