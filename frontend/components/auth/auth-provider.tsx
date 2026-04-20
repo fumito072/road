@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { ReactNode } from "react";
@@ -52,10 +53,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(() => readStoredToken());
   const [error, setError] = useState<string | null>(null);
 
+  const tokenRef = useRef<string | null>(token);
+  tokenRef.current = token;
+
   useEffect(() => {
-    setTokenGetter(async () => token);
+    setTokenGetter(async () => tokenRef.current);
     return () => setTokenGetter(null);
-  }, [token]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
