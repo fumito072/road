@@ -6,7 +6,7 @@ import { AuthProvider } from "@/components/auth/auth-provider";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "ROAD OCR Upload",
+  title: "LOAD OCR Upload",
   description: "OCR 用ファイルアップロードと実行に絞ったシンプルなフロントエンド。",
 };
 
