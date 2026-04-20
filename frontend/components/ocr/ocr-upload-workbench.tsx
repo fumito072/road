@@ -18,7 +18,7 @@ import {
 import { acceptedFormats } from "@/data/ocr";
 import { TabBar } from "@/components/tabs/tab-bar";
 import { TabSettingsModal } from "@/components/tabs/tab-settings-modal";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchBlob } from "@/lib/api";
 import type {
   DestinationCandidate,
   Tab,
@@ -866,8 +866,47 @@ function FilePreviewModal({
   mimeType: string;
   onClose: () => void;
 }) {
-  const src = `/api/uploads/${uploadId}/files/${fileId}/preview`;
   const isImage = mimeType.startsWith("image/");
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let createdUrl: string | null = null;
+
+    (async () => {
+      try {
+        const blob = await apiFetchBlob(`/uploads/${uploadId}/files/${fileId}/preview`);
+        if (cancelled) return;
+        createdUrl = URL.createObjectURL(blob);
+        setBlobUrl(createdUrl);
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "プレビューの取得に失敗しました");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (createdUrl) URL.revokeObjectURL(createdUrl);
+    };
+  }, [uploadId, fileId]);
+
+  const handleDownload = async () => {
+    try {
+      const blob = await apiFetchBlob(`/uploads/${uploadId}/files/${fileId}/preview`);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ダウンロードに失敗しました");
+    }
+  };
 
   return (
     <div
@@ -881,13 +920,13 @@ function FilePreviewModal({
         <div className="flex items-center justify-between border-b border-[#e5ebf1] bg-[#f6f8fb] px-5 py-3">
           <p className="truncate text-sm font-semibold text-[#1f2b37]">{name}</p>
           <div className="flex items-center gap-3">
-            <a
-              href={src}
-              download={name}
+            <button
+              type="button"
+              onClick={handleDownload}
               className="text-xs font-medium text-[#127780] hover:underline"
             >
               ダウンロード
-            </a>
+            </button>
             <button
               type="button"
               onClick={onClose}
@@ -898,10 +937,18 @@ function FilePreviewModal({
           </div>
         </div>
         <div className="flex-1 overflow-auto bg-[#eef2f7]">
-          {isImage ? (
-            <img src={src} alt={name} className="mx-auto max-h-full max-w-full object-contain" />
+          {error ? (
+            <div className="flex h-full items-center justify-center px-6 text-center text-sm text-[#b43a6a]">
+              {error}
+            </div>
+          ) : !blobUrl ? (
+            <div className="flex h-full items-center justify-center text-sm text-[#4c6478]">
+              読み込み中...
+            </div>
+          ) : isImage ? (
+            <img src={blobUrl} alt={name} className="mx-auto max-h-full max-w-full object-contain" />
           ) : (
-            <iframe src={src} title={name} className="h-full w-full" />
+            <iframe src={blobUrl} title={name} className="h-full w-full" />
           )}
         </div>
       </div>
