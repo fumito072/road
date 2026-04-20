@@ -41,7 +41,7 @@ export function SignInScreen() {
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="w-full rounded-lg border border-[#d8e6ef] px-3 py-2 text-sm text-[#1e3247] outline-none focus:border-[#7aa6c5] focus:ring-1 focus:ring-[#7aa6c5]"
+            className="w-full rounded-lg border border-[#d8e6ef] bg-white px-3 py-2 text-sm text-[#1e3247] placeholder-[#9eb0c0] outline-none [color-scheme:light] focus:border-[#7aa6c5] focus:ring-1 focus:ring-[#7aa6c5]"
           />
         </label>
 
@@ -53,7 +53,7 @@ export function SignInScreen() {
             required
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="w-full rounded-lg border border-[#d8e6ef] px-3 py-2 text-sm text-[#1e3247] outline-none focus:border-[#7aa6c5] focus:ring-1 focus:ring-[#7aa6c5]"
+            className="w-full rounded-lg border border-[#d8e6ef] bg-white px-3 py-2 text-sm text-[#1e3247] placeholder-[#9eb0c0] outline-none [color-scheme:light] focus:border-[#7aa6c5] focus:ring-1 focus:ring-[#7aa6c5]"
           />
         </label>
 
