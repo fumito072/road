@@ -64,7 +64,7 @@ export class OcrService {
       });
       parts.push({
         inline_data: {
-          mime_type: file.mimeType || this.inferMimeType(file.originalFileName),
+          mime_type: this.resolveMimeType(file.mimeType, file.originalFileName),
           data: buffer.toString('base64'),
         },
       });
@@ -333,6 +333,15 @@ export class OcrService {
     }
 
     return readFile(storagePath);
+  }
+
+  private resolveMimeType(mimeType: string, fileName: string) {
+    const trusted = mimeType?.trim();
+    if (trusted && trusted !== 'application/octet-stream') {
+      return trusted;
+    }
+    const inferred = this.inferMimeType(fileName);
+    return inferred === 'application/octet-stream' ? 'application/pdf' : inferred;
   }
 
   private inferMimeType(fileName: string) {
