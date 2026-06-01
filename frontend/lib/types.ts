@@ -28,6 +28,7 @@ export interface NamingRule {
 export interface UploadFileResult {
   originalFileName: string;
   documentType?: string;
+  documentDate?: string;
   outputFileName?: string;
   confidence?: number;
   reason?: string;
@@ -45,9 +46,25 @@ export interface DestinationResolution {
   customerFolderPath?: string;
   customerFolderExists: boolean;
   businessTabFound: boolean;
+  destinationMode?: 'existing' | 'new';
+  destinationFolderName?: string;
   destinationCandidates: DestinationCandidate[];
   newFolderPlan: string[];
   warnings: string[];
+}
+
+export interface SharepointFolderOption {
+  id: string;
+  name: string;
+  path: string;
+  webUrl: string;
+}
+
+export interface SharepointFolderBrowserResult {
+  rootPath: string;
+  currentPath: string;
+  parentPath: string | null;
+  folders: SharepointFolderOption[];
 }
 
 export interface UploadStructuredResult {
@@ -58,6 +75,10 @@ export interface UploadStructuredResult {
   contractNumber?: string;
   applicationNumber?: string;
   sharepointFolderPath?: string;
+  destinationMode?: 'existing' | 'new';
+  destinationFolderName?: string;
+  fileCustomerName?: string;
+  fileDate?: string;
   confidence?: number;
   summary?: string;
   destinationResolution?: DestinationResolution;

@@ -7,6 +7,7 @@ type SessionUser = {
   id: string;
   email: string;
   displayName: string | null;
+  role: 'USER' | 'ADMIN';
 };
 
 @Injectable()
@@ -28,10 +29,10 @@ export class AuthService {
       throw new UnauthorizedException('メールアドレスまたはパスワードが正しくありません');
     }
 
-    const token = await this.jwt.signAsync({ sub: user.id, email: user.email });
+    const token = await this.jwt.signAsync({ sub: user.id, email: user.email, role: user.role });
     return {
       token,
-      user: { id: user.id, email: user.email, displayName: user.displayName },
+      user: { id: user.id, email: user.email, displayName: user.displayName, role: user.role },
     };
   }
 
@@ -42,7 +43,7 @@ export class AuthService {
       if (!user) {
         throw new UnauthorizedException('ユーザーが見つかりません');
       }
-      return { id: user.id, email: user.email, displayName: user.displayName };
+      return { id: user.id, email: user.email, displayName: user.displayName, role: user.role };
     } catch {
       throw new UnauthorizedException('セッションの有効期限が切れました。再度サインインしてください。');
     }
@@ -51,12 +52,13 @@ export class AuthService {
   async getOrCreateDevUser(): Promise<SessionUser> {
     const user = await this.prisma.user.upsert({
       where: { email: 'dev@localhost' },
-      update: {},
+      update: { role: 'ADMIN' },
       create: {
         email: 'dev@localhost',
         displayName: 'Dev User',
+        role: 'ADMIN',
       },
     });
-    return { id: user.id, email: user.email, displayName: user.displayName };
+    return { id: user.id, email: user.email, displayName: user.displayName, role: user.role };
   }
 }

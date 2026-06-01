@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { OcrService } from '../ocr/ocr.service';
 import { SharepointFolderEntry, SharepointService } from '../sharepoint/sharepoint.service';
@@ -37,9 +37,18 @@ type DestinationResolution = {
   customerFolderPath?: string;
   customerFolderExists: boolean;
   businessTabFound: boolean;
+  destinationMode?: 'existing' | 'new';
+  destinationFolderName?: string;
   destinationCandidates: DestinationCandidate[];
   newFolderPlan: string[];
   warnings: string[];
+};
+
+type FolderBrowserResult = {
+  rootPath: string;
+  currentPath: string;
+  parentPath: string | null;
+  folders: SharepointFolderEntry[];
 };
 
 type CustomerFolderMatch = {
@@ -54,6 +63,10 @@ type UploadStructuredResult = {
   customerKana?: string;
   applicationNumber?: string;
   sharepointFolderPath?: string;
+  destinationMode?: 'existing' | 'new';
+  destinationFolderName?: string;
+  fileCustomerName?: string;
+  fileDate?: string;
   customerNameCandidates?: string[];
   customerKanaCandidates?: string[];
   destinationResolution?: DestinationResolution;
@@ -66,6 +79,7 @@ const BUSINESS_FOLDER_ALIASES: Record<string, string[]> = {
   '電力': ['電力'],
   'コラボ': ['コラボ'],
   'リース・現金': ['リース・現金', 'リース', '現金', 'ＣＩＳ'],
+  '経理': ['経理', '酒井（領収証）', '酒井（領収書）', '領収書'],
   '酒井（領収書）': ['酒井（領収証）', '酒井（領収書）'],
 };
 
@@ -80,6 +94,7 @@ type CachedFolderList = {
 
 @Injectable()
 export class UploadsService {
+  private readonly logger = new Logger(UploadsService.name);
   private readonly folderListCache = new Map<string, CachedFolderList>();
 
   constructor(
@@ -104,6 +119,25 @@ export class UploadsService {
     });
     if (!upload) throw new NotFoundException('Upload not found');
     return upload;
+  }
+
+  async listSharepointFolders(id: string, userId: string, path?: string): Promise<FolderBrowserResult> {
+    const upload = await this.findOne(id, userId);
+    const rootPath = this.getFolderBrowserRootPath(upload);
+    const requestedPath = this.normalizeFolderPath(path) || rootPath;
+
+    if (!this.isFolderPathWithinRoot(requestedPath, rootPath)) {
+      throw new BadRequestException('Requested folder path is outside of the configured SharePoint root');
+    }
+
+    const folders = await this.cachedListFolders(upload, requestedPath);
+
+    return {
+      rootPath,
+      currentPath: requestedPath,
+      parentPath: this.getParentFolderPath(requestedPath, rootPath),
+      folders: folders.sort((left, right) => left.name.localeCompare(right.name, 'ja')),
+    };
   }
 
   async create(dto: CreateUploadDto, userId: string) {
@@ -172,57 +206,100 @@ export class UploadsService {
   async runOcr(id: string, userId: string) {
     const upload = await this.findOne(id, userId);
 
-    await this.prisma.upload.update({
+    if (
+      upload.status === UploadStatus.OCR_DONE ||
+      upload.status === UploadStatus.CONFIRMED ||
+      upload.status === UploadStatus.UPLOADING_SHAREPOINT ||
+      upload.status === UploadStatus.COMPLETED
+    ) {
+      return upload;
+    }
+
+    if (upload.status === UploadStatus.OCR_PROCESSING) {
+      return upload;
+    }
+
+    const processingUpload = await this.prisma.upload.update({
       where: { id },
       data: { status: UploadStatus.OCR_PROCESSING },
+      include: { files: true },
     });
+
+    void this.completeOcr(id, userId).catch((err) => {
+      this.logger.error(
+        `Async OCR job failed for upload ${id}`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    });
+
+    return processingUpload;
+  }
+
+  private async completeOcr(id: string, userId: string) {
+    const upload = await this.findOne(id, userId);
 
     const namingRules = await this.namingRulesService.findAllByTab(upload.tabId);
 
-    const result = await this.ocrService.extract(
-      upload.files.map((f) => ({
-        storagePath: f.storagePath,
-        mimeType: f.mimeType,
-        originalFileName: f.originalFileName,
-      })),
-      upload.tab.ocrPromptTemplate,
-      {
-        tabName: upload.tab.name,
-        baseSharepointFolderPath: upload.tab.sharepointFolderPath,
-        namingRules: namingRules.map((r: { documentType: string; pattern: string; description: string | null }) => ({
-          documentType: r.documentType,
-          pattern: r.pattern,
-          description: r.description,
+    try {
+      const result = await this.ocrService.extract(
+        upload.files.map((f) => ({
+          storagePath: f.storagePath,
+          mimeType: f.mimeType,
+          originalFileName: f.originalFileName,
         })),
-      },
-    );
+        upload.tab.ocrPromptTemplate,
+        {
+          tabName: upload.tab.name,
+          baseSharepointFolderPath: upload.tab.sharepointFolderPath,
+          namingRules: namingRules.map((r: { documentType: string; pattern: string; description: string | null }) => ({
+            documentType: r.documentType,
+            pattern: r.pattern,
+            description: r.description,
+          })),
+        },
+      );
 
-    const structured = this.normalizeStructuredResult((result.structured ?? {}) as UploadStructuredResult);
+      const structured = this.normalizeStructuredResult((result.structured ?? {}) as UploadStructuredResult);
 
-    return this.prisma.upload.update({
-      where: { id },
-      data: {
-        status: UploadStatus.OCR_DONE,
-        ocrRawResponse: result.raw as unknown as Prisma.InputJsonValue,
-        ocrStructuredResult: structured as unknown as Prisma.InputJsonValue,
-        ocrConfidence: result.confidence,
-        needsReview: result.confidence < 0.8,
-        contractNumber: structured.contractNumber ?? upload.contractNumber,
-        customerName: structured.customerName ?? null,
-        applicationNumber: structured.applicationNumber ?? null,
-      },
-      include: { files: true },
-    });
+      return this.prisma.upload.update({
+        where: { id },
+        data: {
+          status: UploadStatus.OCR_DONE,
+          ocrRawResponse: result.raw as unknown as Prisma.InputJsonValue,
+          ocrStructuredResult: structured as unknown as Prisma.InputJsonValue,
+          ocrConfidence: result.confidence,
+          needsReview: result.confidence < 0.8,
+          contractNumber: structured.contractNumber ?? upload.contractNumber,
+          customerName: structured.customerName ?? null,
+          applicationNumber: structured.applicationNumber ?? null,
+        },
+        include: { files: true },
+      });
+    } catch (err) {
+      await this.prisma.upload.update({
+        where: { id },
+        data: { status: UploadStatus.ERROR },
+      });
+      throw err;
+    }
   }
 
   async resolveDestination(id: string, userId: string, dto: ResolveUploadDto) {
     const upload = await this.findOne(id, userId);
     const structured = this.normalizeStructuredResult((upload.ocrStructuredResult ?? {}) as UploadStructuredResult);
-    const requestedCustomerName = dto.customerName?.trim() || structured.customerName;
+    const requestedCustomerName = dto.destinationCustomerName?.trim() || dto.customerName?.trim() || structured.customerName;
     const customerKana = dto.customerKana?.trim() || structured.customerKana;
+    const contractNumber = dto.contractNumber !== undefined ? dto.contractNumber.trim() : structured.contractNumber;
+    const applicationNumber = dto.applicationNumber !== undefined ? dto.applicationNumber.trim() : structured.applicationNumber;
+    const destinationMode = dto.destinationMode ?? 'existing';
+    const destinationFolderName = this.sanitizePathSegment(dto.destinationFolderName);
 
     if (!requestedCustomerName) {
       throw new BadRequestException('customerName is required to resolve SharePoint destination');
+    }
+
+    if (destinationMode === 'new' && !destinationFolderName) {
+      throw new BadRequestException('destinationFolderName is required when creating a new destination folder');
     }
 
     const customerRootPath = this.buildCustomerRootPath(upload.tab.sharepointFolderPath, upload.tab.name, customerKana);
@@ -304,19 +381,33 @@ export class UploadsService {
       }
     }
 
+    const resolvedDestination = destinationMode === 'new' && destinationFolderName
+      ? this.applyNewDestinationFolder(destinationResolution, destinationFolderName)
+      : {
+          ...destinationResolution,
+          destinationMode,
+          destinationFolderName: destinationFolderName || destinationResolution.destinationFolderName,
+        };
+
     const nextStructured: UploadStructuredResult = {
       ...structured,
       customerName,
       customerKana,
+      contractNumber,
+      applicationNumber,
       customerNameCandidates,
-      sharepointFolderPath: destinationResolution.destinationCandidates[0]?.absolutePath ?? '',
-      destinationResolution,
+      destinationMode,
+      destinationFolderName,
+      sharepointFolderPath: resolvedDestination.destinationCandidates[0]?.absolutePath ?? '',
+      destinationResolution: resolvedDestination,
     };
 
     return this.prisma.upload.update({
       where: { id },
       data: {
         customerName,
+        contractNumber: contractNumber || null,
+        applicationNumber: applicationNumber || null,
         ocrStructuredResult: nextStructured as unknown as Prisma.InputJsonValue,
       },
       include: { files: true },
@@ -327,6 +418,11 @@ export class UploadsService {
     const upload = await this.findOne(id, userId);
 
     const currentStructured = ((upload.ocrStructuredResult ?? {}) as UploadStructuredResult);
+    const requestedSharepointFolderPath =
+      dto.sharepointFolderPath?.trim() ||
+      (dto.ocrStructuredResult as UploadStructuredResult | undefined)?.sharepointFolderPath?.trim() ||
+      currentStructured.sharepointFolderPath?.trim() ||
+      this.buildTemporaryAiOcrPath(upload);
     const nextStructured: UploadStructuredResult = {
       ...currentStructured,
       ...(dto.ocrStructuredResult as UploadStructuredResult | undefined),
@@ -334,10 +430,7 @@ export class UploadsService {
       customerName: dto.customerName ?? currentStructured.customerName,
       customerKana: dto.customerKana ?? currentStructured.customerKana,
       applicationNumber: dto.applicationNumber ?? currentStructured.applicationNumber,
-      sharepointFolderPath:
-        dto.sharepointFolderPath ??
-        (dto.ocrStructuredResult as UploadStructuredResult | undefined)?.sharepointFolderPath ??
-        currentStructured.sharepointFolderPath,
+      sharepointFolderPath: requestedSharepointFolderPath,
     };
 
     if (!nextStructured.customerName?.trim()) {
@@ -534,6 +627,31 @@ export class UploadsService {
     return candidates;
   }
 
+  private applyNewDestinationFolder(
+    destinationResolution: DestinationResolution,
+    destinationFolderName: string,
+  ): DestinationResolution {
+    const destinationCandidates = destinationResolution.destinationCandidates.map((candidate) => ({
+      absolutePath: this.joinFolderPath(candidate.absolutePath, destinationFolderName),
+      exists: false,
+      reason: candidate.exists
+        ? '選択した既存フォルダ配下に新規フォルダを作成して保存します。'
+        : candidate.reason,
+    }));
+    const newFolderPlan = this.uniqueStrings([
+      ...destinationResolution.newFolderPlan,
+      ...destinationCandidates.map((candidate) => candidate.absolutePath),
+    ]);
+
+    return {
+      ...destinationResolution,
+      destinationMode: 'new',
+      destinationFolderName,
+      destinationCandidates,
+      newFolderPlan,
+    };
+  }
+
   private async cachedListFolders(
     upload: Awaited<ReturnType<UploadsService['findOne']>>,
     folderPath: string,
@@ -592,6 +710,10 @@ export class UploadsService {
     return this.joinFolderPath(baseRoot, ...buckets);
   }
 
+  private getFolderBrowserRootPath(upload: Awaited<ReturnType<UploadsService['findOne']>>) {
+    return this.getCustomerSearchBasePath(upload.tab.sharepointFolderPath, upload.tab.name);
+  }
+
   private getCustomerSearchBasePath(configuredPath: string | null | undefined, tabName: string) {
     const normalized = (configuredPath ?? '').trim().replace(/^\/+|\/+$/g, '');
     if (!normalized) {
@@ -617,6 +739,42 @@ export class UploadsService {
     }
 
     return normalized;
+  }
+
+  private buildTemporaryAiOcrPath(upload: Awaited<ReturnType<UploadsService['findOne']>>) {
+    return this.joinFolderPath(
+      this.getFolderBrowserRootPath(upload),
+      'AI OCR',
+      this.sanitizePathSegment(upload.tab.name),
+      this.sanitizePathSegment(upload.folderName) || upload.id,
+    );
+  }
+
+  private normalizeFolderPath(value: string | null | undefined) {
+    return (value ?? '').trim().replace(/^\/+|\/+$/g, '').replace(/\/+/g, '/');
+  }
+
+  private isFolderPathWithinRoot(path: string, rootPath: string) {
+    const normalizedPath = this.normalizeFolderPath(path);
+    const normalizedRoot = this.normalizeFolderPath(rootPath);
+
+    return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+  }
+
+  private getParentFolderPath(path: string, rootPath: string) {
+    const normalizedPath = this.normalizeFolderPath(path);
+    const normalizedRoot = this.normalizeFolderPath(rootPath);
+
+    if (!normalizedPath || normalizedPath === normalizedRoot) {
+      return null;
+    }
+
+    const parentPath = normalizedPath.split('/').slice(0, -1).join('/');
+    if (!parentPath || !this.isFolderPathWithinRoot(parentPath, normalizedRoot)) {
+      return null;
+    }
+
+    return parentPath;
   }
 
   private getBusinessFolderAliases(tabName: string) {
@@ -672,6 +830,10 @@ export class UploadsService {
     const withoutBoth = withoutBracketContent.replace(/株式会社|有限会社|合同会社|合資会社|合名会社|医療法人|社会福祉法人|一般社団法人|一般財団法人|（株）|\(株\)|㈱|Inc\.?|Co\.?Ltd\.?|LLC|Ltd\.?|Corp\.?/gi, '');
 
     return this.uniqueStrings([normalized, collapsed, sanitized, withoutBracketContent, withoutCompanyDesignator, withoutBoth]);
+  }
+
+  private sanitizePathSegment(value: string | null | undefined) {
+    return (value ?? '').trim().replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, '_');
   }
 
   private calculateDiceCoefficient(left: string, right: string) {

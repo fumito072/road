@@ -38,6 +38,15 @@ export class UploadsController {
     return this.uploadsService.findAllByTab(tabId, user.id);
   }
 
+  @Get(':id/folders')
+  listFolders(
+    @Param('id') id: string,
+    @Query('path') path: string | undefined,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.uploadsService.listSharepointFolders(id, user.id, path);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string, @CurrentUser() user: { id: string }) {
     return this.uploadsService.findOne(id, user.id);

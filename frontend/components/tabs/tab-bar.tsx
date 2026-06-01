@@ -30,6 +30,7 @@ interface TabBarProps {
   onSettingsClick: (tab: Tab) => void;
   onAddClick?: () => void;
   showAddButton?: boolean;
+  canManageSettings?: boolean;
 }
 
 export function TabBar({
@@ -38,6 +39,7 @@ export function TabBar({
   onSettingsClick,
   onAddClick,
   showAddButton = false,
+  canManageSettings = false,
 }: TabBarProps) {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [loading, setLoading] = useState(true);
@@ -93,7 +95,7 @@ export function TabBar({
             <Icon className="h-4 w-4" />
             <span>{tab.name}</span>
 
-            {isActive && (
+            {isActive && canManageSettings && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();

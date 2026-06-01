@@ -27,18 +27,8 @@ const defaultTabs = [
     sharepointFolderPath: 'スキャナ/リース・現金',
   },
   {
-    name: '電力',
-    order: 2,
-    isDefault: true,
-    isActive: true,
-    icon: 'zap',
-    sharepointSiteId: SHAREPOINT_SITE_ID,
-    sharepointDriveId: SHAREPOINT_DRIVE_ID,
-    sharepointFolderPath: 'スキャナ/電力',
-  },
-  {
     name: 'モバイル',
-    order: 3,
+    order: 2,
     isDefault: true,
     isActive: true,
     icon: 'smartphone',
@@ -47,23 +37,38 @@ const defaultTabs = [
     sharepointFolderPath: 'スキャナ/モバイル',
   },
   {
-    name: '酒井（領収書）',
+    name: '電力',
+    order: 3,
+    isDefault: true,
+    isActive: true,
+    icon: 'zap',
+    sharepointSiteId: SHAREPOINT_SITE_ID,
+    sharepointDriveId: SHAREPOINT_DRIVE_ID,
+    sharepointFolderPath: 'スキャナ/電力',
+  },
+  {
+    name: '経理',
     order: 4,
     isDefault: true,
     isActive: true,
     icon: 'receipt',
     sharepointSiteId: SHAREPOINT_SITE_ID,
     sharepointDriveId: SHAREPOINT_DRIVE_ID,
-    sharepointFolderPath: 'スキャナ/酒井（領収証）',
+    sharepointFolderPath: 'スキャナ/経理',
   },
 ];
+
+const legacyDefaultTabNames: Record<string, string[]> = {
+  '経理': ['酒井（領収書）', '酒井（領収証）'],
+};
 
 async function main() {
   console.log('Seeding default tabs...');
 
   for (const tab of defaultTabs) {
+    const candidateNames = [tab.name, ...(legacyDefaultTabNames[tab.name] ?? [])];
     const existing = await prisma.tab.findFirst({
-      where: { name: tab.name, isDefault: true },
+      where: { name: { in: candidateNames }, isDefault: true },
     });
 
     if (!existing) {
@@ -73,6 +78,7 @@ async function main() {
       await prisma.tab.update({
         where: { id: existing.id },
         data: {
+          name: tab.name,
           order: tab.order,
           isDefault: true,
           isActive: true,

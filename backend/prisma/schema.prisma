@@ -13,12 +13,18 @@ model User {
   passwordHash   String?
   firebaseUid    String?  @unique
   displayName    String?
+  role           UserRole @default(USER)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
   uploads Upload[]
 
   @@map("users")
+}
+
+enum UserRole {
+  USER
+  ADMIN
 }
 
 model Tab {

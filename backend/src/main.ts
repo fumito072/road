@@ -11,15 +11,25 @@ async function bootstrap() {
 
   const frontendUrl = process.env.FRONTEND_URL?.trim();
   const isProduction = process.env.NODE_ENV === 'production';
-  if (isProduction && !frontendUrl) {
+  const allowAnyOrigin =
+    process.env.APP_ENV === 'staging' ||
+    process.env.NODE_ENV === 'staging' ||
+    process.env.CORS_ALLOW_ALL_ORIGINS === 'true';
+
+  if (isProduction && !frontendUrl && !allowAnyOrigin) {
     throw new Error(
       'FRONTEND_URL environment variable must be set when NODE_ENV=production',
     );
   }
-  const allowedOrigins = frontendUrl ? [frontendUrl] : ['http://localhost:3000'];
+  const allowedOrigins = new Set(
+    [
+      frontendUrl,
+      ...(isProduction ? [] : ['http://localhost:3000']),
+    ].filter(Boolean),
+  );
   app.enableCors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (!origin || allowAnyOrigin || allowedOrigins.has(origin)) {
         callback(null, true);
       } else {
         callback(new Error(`Origin ${origin} not allowed by CORS`));

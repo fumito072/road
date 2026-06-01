@@ -1,4 +1,11 @@
-import { BadRequestException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as admin from 'firebase-admin';
 import { readFile } from 'node:fs/promises';
@@ -25,6 +32,11 @@ export interface OcrResult {
   confidence: number;
 }
 
+type GeminiGenerateResult = {
+  model: string;
+  raw: Record<string, unknown>;
+};
+
 @Injectable()
 export class OcrService {
   private readonly logger = new Logger(OcrService.name);
@@ -40,15 +52,24 @@ export class OcrService {
     promptTemplate?: string | null,
     context?: OcrContext,
   ): Promise<OcrResult> {
+    const mockMode = this.config.get<string>('OCR_MOCK_MODE') === 'true';
     const apiKey = this.config.get<string>('GEMINI_API_KEY');
-    const model = this.config.get<string>('GEMINI_MODEL') ?? 'gemini-2.0-flash';
+    const model = this.config.get<string>('GEMINI_MODEL') ?? 'gemini-2.5-flash';
+    const fallbackModels = this.parseModelList(
+      this.config.get<string>('GEMINI_FALLBACK_MODELS') ?? 'gemini-2.5-flash-lite',
+    );
+
+    if (mockMode) {
+      this.logger.warn('OCR_MOCK_MODE is enabled; returning mock OCR result without calling Gemini');
+      return this.buildMockResult(files);
+    }
 
     if (!apiKey) {
       throw new BadRequestException('GEMINI_API_KEY is not configured');
     }
 
     this.logger.log(
-      `OCR extract called for ${files.length} files, apiKey present: ${!!apiKey}`,
+      `OCR extract called for ${files.length} files, model: ${model}, fallbackModels: ${fallbackModels.join(', ') || 'none'}, apiKey present: ${!!apiKey}`,
     );
 
     const parts: Array<Record<string, unknown>> = [
@@ -70,32 +91,14 @@ export class OcrService {
       });
     }
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          contents: [{ parts }],
-          generationConfig: {
-            responseMimeType: 'application/json',
-            temperature: 0.2,
-          },
-        }),
-      },
+    const { raw, model: usedModel } = await this.generateContentWithFallback(
+      apiKey,
+      [model, ...fallbackModels],
+      parts,
     );
 
-    const raw = (await response.json()) as Record<string, unknown>;
-
-    if (!response.ok) {
-      this.logger.error(
-        `Gemini OCR request failed (status=${response.status}): ${JSON.stringify(raw)}`,
-      );
-      throw new InternalServerErrorException(
-        'OCR処理でエラーが発生しました。しばらく待ってから再実行してください。',
-      );
+    if (usedModel !== model) {
+      this.logger.warn(`Gemini OCR completed with fallback model: ${usedModel}`);
     }
 
     let text: string;
@@ -116,6 +119,165 @@ export class OcrService {
       structured: normalized,
       confidence: Number(normalized.confidence ?? 0),
     };
+  }
+
+  private buildMockResult(files: ExtractFileInput[]): OcrResult {
+    const parsed = {
+      customerName: '確認用顧客',
+      customerKana: '',
+      customerNameCandidates: ['確認用顧客'],
+      customerKanaCandidates: [],
+      contractNumber: '確認要契約ID',
+      applicationNumber: '',
+      sharepointFolderPath: '',
+      confidence: 0.5,
+      summary: 'OCR_MOCK_MODE による仮のOCR結果です。実運用前に必ず内容を確認してください。',
+      fileResults: files.map((file) => ({
+        originalFileName: file.originalFileName,
+        documentType: this.inferDocumentType(file.originalFileName),
+        documentDate: '',
+        confidence: 0.5,
+        reason: 'OCR_MOCK_MODE によるファイル名ベースの仮分類です。',
+      })),
+    };
+    const structured = this.normalizeStructuredResult(parsed, files);
+
+    return {
+      raw: {
+        mock: true,
+        model: 'OCR_MOCK_MODE',
+        fileCount: files.length,
+      },
+      structured,
+      confidence: Number(structured.confidence ?? 0),
+    };
+  }
+
+  private async generateContentWithFallback(
+    apiKey: string,
+    models: string[],
+    parts: Array<Record<string, unknown>>,
+  ): Promise<GeminiGenerateResult> {
+    const uniqueModels = [...new Set(models.map((item) => item.trim()).filter(Boolean))];
+    const attempts = this.parsePositiveInt(this.config.get<string>('GEMINI_RETRY_ATTEMPTS'), 3);
+    let lastStatus = 0;
+    let lastRaw: Record<string, unknown> = {};
+
+    for (const model of uniqueModels) {
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              contents: [{ parts }],
+              generationConfig: {
+                responseMimeType: 'application/json',
+                temperature: 0.2,
+              },
+            }),
+          },
+        );
+        const raw = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+
+        if (response.ok) {
+          return { model, raw };
+        }
+
+        lastStatus = response.status;
+        lastRaw = raw;
+        this.logger.error(
+          `Gemini OCR request failed (model=${model}, attempt=${attempt}/${attempts}, status=${response.status}): ${JSON.stringify(raw)}`,
+        );
+
+        if (response.status === 429) {
+          this.throwGeminiQuotaError(response, raw);
+        }
+
+        if (!this.isRetryableGeminiStatus(response.status)) {
+          throw new InternalServerErrorException(
+            'OCR処理でエラーが発生しました。しばらく待ってから再実行してください。',
+          );
+        }
+
+        if (attempt < attempts) {
+          await this.sleep(this.retryDelayMs(attempt));
+        }
+      }
+    }
+
+    this.logger.error(
+      `Gemini OCR request exhausted retryable attempts (lastStatus=${lastStatus}): ${JSON.stringify(lastRaw)}`,
+    );
+    throw new HttpException(
+      {
+        message:
+          'Gemini API が混雑しています。少し時間を置いてから再実行してください。',
+        error: 'Service Unavailable',
+        statusCode: HttpStatus.SERVICE_UNAVAILABLE,
+      },
+      HttpStatus.SERVICE_UNAVAILABLE,
+    );
+  }
+
+  private throwGeminiQuotaError(response: Response, raw: Record<string, unknown>): never {
+    const retryAfter = response.headers.get('retry-after') ?? this.extractRetryDelaySeconds(raw);
+    throw new HttpException(
+      {
+        message: retryAfter
+          ? `Gemini API の利用上限に達しています。${retryAfter}秒ほど時間を置くか、Gemini API キーの利用枠を確認してから再実行してください。`
+          : 'Gemini API の利用上限に達しています。少し時間を置くか、Gemini API キーの利用枠を確認してから再実行してください。',
+        error: 'Too Many Requests',
+        statusCode: HttpStatus.TOO_MANY_REQUESTS,
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
+
+  private isRetryableGeminiStatus(status: number) {
+    return status === 500 || status === 502 || status === 503 || status === 504;
+  }
+
+  private retryDelayMs(attempt: number) {
+    return Math.min(1000 * 2 ** (attempt - 1), 4000);
+  }
+
+  private sleep(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private parseModelList(value: string) {
+    return value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  private parsePositiveInt(value: string | undefined, fallback: number) {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      return fallback;
+    }
+    return Math.min(parsed, 5);
+  }
+
+  private extractRetryDelaySeconds(raw: Record<string, unknown>) {
+    const details = raw.error && typeof raw.error === 'object'
+      ? (raw.error as Record<string, unknown>).details
+      : undefined;
+    if (!Array.isArray(details)) return null;
+
+    for (const detail of details) {
+      if (!detail || typeof detail !== 'object') continue;
+      const retryDelay = (detail as Record<string, unknown>).retryDelay;
+      if (typeof retryDelay === 'string') {
+        return retryDelay.replace(/s$/, '');
+      }
+    }
+    return null;
   }
 
   private buildPrompt(
@@ -351,5 +513,16 @@ export class OcrService {
     if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
     if (lower.endsWith('.tif') || lower.endsWith('.tiff')) return 'image/tiff';
     return 'application/octet-stream';
+  }
+
+  private inferDocumentType(fileName: string) {
+    if (fileName.includes('申込')) return '申込書';
+    if (fileName.includes('契約')) return '契約書';
+    if (fileName.includes('重要事項')) return '重要事項';
+    if (fileName.includes('請求')) return '請求書';
+    if (fileName.includes('領収')) return '領収書';
+    if (fileName.includes('チェック')) return 'チェックシート';
+    if (fileName.includes('明細')) return '明細';
+    return 'その他';
   }
 }

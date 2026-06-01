@@ -2,10 +2,10 @@ import { PrismaClient } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 
 async function main() {
-  const [email, password, displayNameArg] = process.argv.slice(2);
+  const [email, password, displayNameArg, roleArg] = process.argv.slice(2);
 
   if (!email || !password) {
-    console.error('Usage: npx ts-node src/scripts/create-user.ts <email> <password> [displayName]');
+    console.error('Usage: npx ts-node src/scripts/create-user.ts <email> <password> [displayName] [USER|ADMIN]');
     process.exit(1);
   }
 
@@ -13,15 +13,16 @@ async function main() {
   try {
     const normalizedEmail = email.trim().toLowerCase();
     const displayName = displayNameArg?.trim() || null;
+    const role = roleArg === 'ADMIN' ? 'ADMIN' : 'USER';
     const passwordHash = await bcrypt.hash(password, 10);
 
     const user = await prisma.user.upsert({
       where: { email: normalizedEmail },
-      update: { passwordHash, displayName },
-      create: { email: normalizedEmail, passwordHash, displayName },
+      update: { passwordHash, displayName, role },
+      create: { email: normalizedEmail, passwordHash, displayName, role },
     });
 
-    console.log(`User ready: ${user.email} (id=${user.id})`);
+    console.log(`User ready: ${user.email} (id=${user.id}, role=${user.role})`);
   } finally {
     await prisma.$disconnect();
   }

@@ -24,7 +24,7 @@ export class AuthController {
 
   @Get('me')
   @UseGuards(AuthGuard)
-  me(@CurrentUser() user: { id: string; email: string; displayName: string | null }) {
+  me(@CurrentUser() user: { id: string; email: string; displayName: string | null; role: 'USER' | 'ADMIN' }) {
     return { user };
   }
 }

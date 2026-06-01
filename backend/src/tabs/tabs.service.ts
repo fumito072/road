@@ -18,27 +18,31 @@ const defaultTabs = [
     icon: 'banknote',
   },
   {
-    name: '電力',
-    order: 2,
-    isDefault: true,
-    isActive: true,
-    icon: 'zap',
-  },
-  {
     name: 'モバイル',
-    order: 3,
+    order: 2,
     isDefault: true,
     isActive: true,
     icon: 'smartphone',
   },
   {
-    name: '酒井（領収書）',
+    name: '電力',
+    order: 3,
+    isDefault: true,
+    isActive: true,
+    icon: 'zap',
+  },
+  {
+    name: '経理',
     order: 4,
     isDefault: true,
     isActive: true,
     icon: 'receipt',
   },
 ] as const;
+
+const legacyDefaultTabNames: Record<string, string[]> = {
+  '経理': ['酒井（領収書）', '酒井（領収証）'],
+};
 
 @Injectable()
 export class TabsService {
@@ -71,23 +75,26 @@ export class TabsService {
 
   private async ensureDefaultTabs() {
     for (const tab of defaultTabs) {
+      const candidateNames = [tab.name, ...(legacyDefaultTabNames[tab.name] ?? [])];
       const existing = await this.prisma.tab.findFirst({
-        where: { name: tab.name },
+        where: { name: { in: candidateNames } },
       });
+      const data = {
+        name: tab.name,
+        order: tab.order,
+        isDefault: true,
+        isActive: true,
+        icon: tab.icon,
+      };
 
       if (!existing) {
-        await this.prisma.tab.create({ data: tab });
+        await this.prisma.tab.create({ data });
         continue;
       }
 
       await this.prisma.tab.update({
         where: { id: existing.id },
-        data: {
-          order: tab.order,
-          isDefault: true,
-          isActive: true,
-          icon: tab.icon,
-        },
+        data,
       });
     }
   }

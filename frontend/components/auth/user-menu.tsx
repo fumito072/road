@@ -13,6 +13,9 @@ export function UserMenu() {
   return (
     <div className="fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-full border border-[#d8e6ef] bg-white/95 px-3 py-1.5 text-xs shadow-sm backdrop-blur">
       <span className="text-[#1e3247]">{label}</span>
+      <span className="rounded-full bg-[#eef5f9] px-2 py-0.5 text-[10px] font-semibold text-[#607083]">
+        {user.role === "ADMIN" ? "管理者" : "ユーザー"}
+      </span>
       <button
         type="button"
         onClick={signOut}

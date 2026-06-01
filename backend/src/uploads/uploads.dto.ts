@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsArray, ValidateNested } from 'class-validator';
+import { IsIn, IsString, IsOptional, IsArray, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class UploadFileDto {
@@ -62,7 +62,27 @@ export class ResolveUploadDto {
 
   @IsString()
   @IsOptional()
+  contractNumber?: string;
+
+  @IsString()
+  @IsOptional()
+  applicationNumber?: string;
+
+  @IsString()
+  @IsOptional()
   customerKana?: string;
+
+  @IsString()
+  @IsOptional()
+  destinationCustomerName?: string;
+
+  @IsIn(['existing', 'new'])
+  @IsOptional()
+  destinationMode?: 'existing' | 'new';
+
+  @IsString()
+  @IsOptional()
+  destinationFolderName?: string;
 }
 
 export class IntakeUploadDto {

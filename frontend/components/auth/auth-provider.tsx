@@ -17,6 +17,7 @@ type SessionUser = {
   id: string;
   email: string;
   displayName: string | null;
+  role: "USER" | "ADMIN";
 };
 
 type AuthStatus = "loading" | "authenticated" | "unauthenticated";

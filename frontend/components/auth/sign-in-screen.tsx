@@ -14,7 +14,7 @@ export function SignInScreen() {
     event.preventDefault();
     setIsSubmitting(true);
     try {
-      await signIn(email, password);
+      await signIn(email.trim(), password);
     } catch {
       // error surfaced via context
     } finally {
