@@ -7,7 +7,6 @@ import { CreateUploadDto, ConfirmUploadDto, IntakeUploadDto, ResolveUploadDto } 
 import { UploadStatus, Prisma } from '@prisma/client';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import * as admin from 'firebase-admin';
 
 type UploadedFile = {
   originalname: string;
@@ -1056,14 +1055,6 @@ export class UploadsService {
         throw new NotFoundException(`Failed to download file from URL: ${storagePath}`);
       }
       return Buffer.from(await response.arrayBuffer());
-    }
-
-    if (storagePath.startsWith('gs://')) {
-      const withoutScheme = storagePath.replace('gs://', '');
-      const [bucketName, ...rest] = withoutScheme.split('/');
-      const filePath = rest.join('/');
-      const [buffer] = await admin.storage().bucket(bucketName).file(filePath).download();
-      return buffer;
     }
 
     try {

@@ -45,8 +45,6 @@ LOAD OCR Hub は、業務タブごとに書類フォルダをアップロード�
   - OCR解析に使用します。
 - Microsoft Graph API / SharePoint
   - 保存先フォルダ検索、階層表示、ファイルアップロードに使用します。
-- Firebase Admin SDK
-  - Firebase Storage / Google Cloud Storage 上のファイルを扱う場合に使用します。
 - Railway
   - 本番・ステージング環境のデプロイ先として利用します。
 
@@ -220,8 +218,6 @@ http://localhost:3000
 | `AZURE_TENANT_ID` | SharePoint利用時必須 | Microsoft Entra ID tenant ID |
 | `AZURE_CLIENT_ID` | SharePoint利用時必須 | Microsoft Graph API用アプリのclient ID |
 | `AZURE_CLIENT_SECRET` | SharePoint利用時必須 | Microsoft Graph API用アプリのclient secret |
-| `FIREBASE_STORAGE_BUCKET` | Firebase Storage利用時必須 | Firebase Storage / GCS bucket名 |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Firebase Storage利用時推奨 | Firebase service account JSONのパス |
 
 ローカル用の例:
 
@@ -241,9 +237,6 @@ GEMINI_RETRY_ATTEMPTS="3"
 AZURE_TENANT_ID="replace-with-tenant-id"
 AZURE_CLIENT_ID="replace-with-client-id"
 AZURE_CLIENT_SECRET="replace-with-client-secret"
-
-FIREBASE_STORAGE_BUCKET="replace-with-bucket-name"
-# GOOGLE_APPLICATION_CREDENTIALS="/absolute/path/to/service-account.json"
 ```
 
 ### frontend/.env.local
@@ -261,7 +254,7 @@ BACKEND_URL=http://localhost:3003
 
 本番・ステージングでは、通常 `BACKEND_URL` にデプロイ済みバックエンドURLを設定します。
 
-## OCR / SharePoint / Firebase / Railway の関係
+## OCR / SharePoint / Railway の関係
 
 ### 全体の処理フロー
 
@@ -309,19 +302,11 @@ SharePoint連携では、Microsoft Graph APIを使用します。
 
 Graph APIを使用するため、Azure / Microsoft Entra ID 側でアプリ登録を行い、適切な権限を付与する必要があります。
 
-### Firebase / Google Cloud Storage
+### ファイルの保存場所
 
-現在の通常アップロードでは、ファイルはバックエンドの `runtime-uploads` に保存されます。  
-一方で、コード上は `gs://...` や Firebase Storage / Google Cloud Storage のファイルを読み込める作りにもなっています。
+通常のアップロードでは、ファイルはバックエンドの `runtime-uploads` に保存されます。
 
-Firebase Storageを使用する場合は、以下が必要です。
-
-- `FIREBASE_STORAGE_BUCKET`
-- Firebase Admin SDKが使える認証情報
-- ローカルでは `GOOGLE_APPLICATION_CREDENTIALS`
-- Railwayなどの本番環境では、サービスアカウント情報を安全な環境変数またはシークレットとして設定
-
-注意: Railwayのファイルシステムは永続ストレージではありません。長期間ファイルを保持する必要がある場合は、Firebase Storage / Google Cloud Storage などの外部ストレージ利用を検討してください。
+注意: Railwayのファイルシステムは永続ストレージではありません。再デプロイ等でファイルが失われる可能性があるため、アップロード〜SharePoint保存は同一セッション内で完結させる運用を推奨します。長期間ファイルを保持する必要がある場合は、永続ボリュームや外部ストレージの利用を検討してください。
 
 ### Railway
 
@@ -333,7 +318,7 @@ Railway Project
     - NestJS API
     - Prisma migration
     - PostgreSQL接続
-    - Gemini / SharePoint / Firebase連携
+    - Gemini / SharePoint連携
 
   frontend service
     - Next.js
@@ -374,8 +359,6 @@ Railway dashboard、またはRailway CLIで以下を設定します。
 - `AZURE_TENANT_ID`
 - `AZURE_CLIENT_ID`
 - `AZURE_CLIENT_SECRET`
-- `FIREBASE_STORAGE_BUCKET`
-- Firebase認証情報
 
 backendは `backend/Dockerfile` を使います。  
 コンテナ起動時に以下が実行されます。

@@ -7,7 +7,6 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as admin from 'firebase-admin';
 import { readFile } from 'node:fs/promises';
 
 type ExtractFileInput = {
@@ -483,15 +482,6 @@ export class OcrService {
       }
 
       return Buffer.from(await response.arrayBuffer());
-    }
-
-    if (storagePath.startsWith('gs://')) {
-      const normalized = storagePath.replace('gs://', '');
-      const slashIndex = normalized.indexOf('/');
-      const bucketName = normalized.slice(0, slashIndex);
-      const filePath = normalized.slice(slashIndex + 1);
-      const [buffer] = await admin.storage().bucket(bucketName).file(filePath).download();
-      return buffer;
     }
 
     return readFile(storagePath);

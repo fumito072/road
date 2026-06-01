@@ -1,6 +1,5 @@
 import { BadRequestException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as admin from 'firebase-admin';
 import { readFile } from 'node:fs/promises';
 
 export interface SharepointUploadResult {
@@ -350,43 +349,7 @@ export class SharepointService {
       return Buffer.from(await response.arrayBuffer());
     }
 
-    if (storagePath.startsWith('gs://')) {
-      const { bucketName, filePath } = this.parseGsUri(storagePath);
-      const [buffer] = await admin.storage().bucket(bucketName).file(filePath).download();
-      return buffer;
-    }
-
-    if (storagePath.startsWith('/') || storagePath.startsWith('./') || storagePath.startsWith('../')) {
-      return readFile(storagePath);
-    }
-
-    const defaultBucket = this.config.get<string>('FIREBASE_STORAGE_BUCKET');
-    if (!defaultBucket) {
-      throw new BadRequestException(
-        `FIREBASE_STORAGE_BUCKET is not configured, so storagePath cannot be resolved: ${storagePath}`,
-      );
-    }
-
-    const [buffer] = await admin
-      .storage()
-      .bucket(defaultBucket)
-      .file(storagePath.replace(/^\/+/, ''))
-      .download();
-    return buffer;
-  }
-
-  private parseGsUri(storagePath: string): { bucketName: string; filePath: string } {
-    const normalized = storagePath.replace('gs://', '');
-    const slashIndex = normalized.indexOf('/');
-
-    if (slashIndex === -1) {
-      throw new BadRequestException(`Invalid gs:// storagePath: ${storagePath}`);
-    }
-
-    return {
-      bucketName: normalized.slice(0, slashIndex),
-      filePath: normalized.slice(slashIndex + 1),
-    };
+    return readFile(storagePath);
   }
 
   private normalizeFolderPath(folderPath: string): string {
