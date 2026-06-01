@@ -23,6 +23,7 @@ backend/dist/
 
 # Internal company notes / working docs — not for client handoff
 /.company/
+/docs/
 
 # Client-provided spec PDF — keep out of the source repo
 /OCR修正案.pdf

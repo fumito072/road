@@ -71,7 +71,6 @@ road/
       ocr/
       tabs/
     lib/
-  docs/                    # 補足ドキュメント
   package.json             # npm workspaces
 ```
 
