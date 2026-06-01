@@ -14,3 +14,15 @@ pnpm-debug.log*
 .venv
 backend/runtime-uploads/
 backend/dist/
+
+# Build artifacts
+*.tsbuildinfo
+
+# Customer/sample data — must never be committed (contains real PII)
+/test/
+
+# Internal company notes / working docs — not for client handoff
+/.company/
+
+# Client-provided spec PDF — keep out of the source repo
+/OCR修正案.pdf
