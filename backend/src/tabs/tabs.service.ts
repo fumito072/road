@@ -1,6 +1,23 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateTabDto, UpdateTabDto } from './tabs.dto';
+
+// SharePoint の保存先は UI から入力しないため、新規タブには既定の出力先を補完する。
+// 既定タブ（seed.ts）と同じサイト/ドライブを使い、フォルダパスは「スキャナ/タブ名」とする。
+// 環境変数で上書き可能。
+const DEFAULT_SHAREPOINT_SITE_ID =
+  process.env.DEFAULT_SHAREPOINT_SITE_ID ??
+  'load1993.sharepoint.com,5399776d-dfbe-4366-92ea-bdd6a29dbbb7,2c10ab4b-5d15-4297-b370-e5de96b96ce4';
+const DEFAULT_SHAREPOINT_DRIVE_ID =
+  process.env.DEFAULT_SHAREPOINT_DRIVE_ID ??
+  'b!bXeZU77fZkOS6r3Wop27t0urECwVXZdCs3Dl3pa5bOQ3xZtxFrJISZvpTn_sroT8';
+const DEFAULT_SHAREPOINT_BASE_PATH =
+  process.env.DEFAULT_SHAREPOINT_BASE_PATH ?? 'スキャナ';
 
 const defaultTabs = [
   {
@@ -60,7 +77,17 @@ export class TabsService {
   }
 
   create(dto: CreateTabDto) {
-    return this.prisma.tab.create({ data: dto });
+    // UI から SharePoint 設定を送らない場合は既定の保存先を補完する。
+    // （空のままだとそのタブはアップロード時に保存先エラーになるため）
+    return this.prisma.tab.create({
+      data: {
+        ...dto,
+        sharepointSiteId: dto.sharepointSiteId ?? DEFAULT_SHAREPOINT_SITE_ID,
+        sharepointDriveId: dto.sharepointDriveId ?? DEFAULT_SHAREPOINT_DRIVE_ID,
+        sharepointFolderPath:
+          dto.sharepointFolderPath ?? `${DEFAULT_SHAREPOINT_BASE_PATH}/${dto.name}`,
+      },
+    });
   }
 
   async update(id: string, dto: UpdateTabDto) {
@@ -70,7 +97,21 @@ export class TabsService {
 
   async remove(id: string) {
     await this.findOne(id);
-    return this.prisma.tab.delete({ where: { id } });
+    try {
+      return await this.prisma.tab.delete({ where: { id } });
+    } catch (error) {
+      // 処理済みの書類（uploads）が紐づくタブは外部キー制約(P2003)で削除できない。
+      // 顧客データを巻き込んで消さないよう、分かりやすいメッセージでブロックする。
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2003'
+      ) {
+        throw new ConflictException(
+          'このタブには処理済みの書類があるため削除できません。',
+        );
+      }
+      throw error;
+    }
   }
 
   private async ensureDefaultTabs() {

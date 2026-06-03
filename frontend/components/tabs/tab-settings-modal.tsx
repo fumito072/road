@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { X, Plus, Trash2 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import type { Tab, NamingRule } from "@/lib/types";
@@ -22,6 +22,34 @@ type EditableNamingRule = {
   _new?: boolean;
 };
 
+// ファイル名パターンに「ボタンで」差し込める項目（日本語ラベル付き）
+const NAMING_PLACEHOLDERS = [
+  { token: "{customerName}", label: "顧客名" },
+  { token: "{contractNumber}", label: "契約番号" },
+  { token: "{applicationNumber}", label: "申込番号" },
+  { token: "{documentType}", label: "書類種別" },
+  { token: "{index}", label: "連番" },
+  { token: "{date}", label: "日付" },
+];
+
+// プレビュー表示用のサンプル値（実際の値ではなく見本）
+const NAMING_SAMPLE: Record<string, string> = {
+  "{customerName}": "山田太郎",
+  "{contractNumber}": "0001234",
+  "{applicationNumber}": "A5678",
+  "{documentType}": "申込書",
+  "{index}": "1",
+  "{date}": "20260101",
+};
+
+function buildFileNamePreview(pattern: string): string {
+  let result = pattern;
+  for (const [token, value] of Object.entries(NAMING_SAMPLE)) {
+    result = result.split(token).join(value);
+  }
+  return result;
+}
+
 export function TabSettingsModal({
   tab,
   isNew,
@@ -31,24 +59,18 @@ export function TabSettingsModal({
   const [name, setName] = useState("");
   const [icon, setIcon] = useState("folder");
   const [ocrPrompt, setOcrPrompt] = useState("");
-  const [workflowPrompt, setWorkflowPrompt] = useState("");
-  const [spSiteId, setSpSiteId] = useState("");
-  const [spDriveId, setSpDriveId] = useState("");
-  const [spFolderPath, setSpFolderPath] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [namingRules, setNamingRules] = useState<EditableNamingRule[]>([]);
-  const [activeSection, setActiveSection] = useState<"basic" | "sharepoint" | "naming">("basic");
+  const [activeSection, setActiveSection] = useState<"basic" | "naming">("basic");
 
   useEffect(() => {
     if (tab && !isNew) {
       setName(tab.name);
       setIcon(tab.icon ?? "folder");
       setOcrPrompt(tab.ocrPromptTemplate ?? "");
-      setWorkflowPrompt(tab.workflowPromptTemplate ?? "");
-      setSpSiteId(tab.sharepointSiteId ?? "");
-      setSpDriveId(tab.sharepointDriveId ?? "");
-      setSpFolderPath(tab.sharepointFolderPath ?? "");
     }
   }, [tab, isNew]);
 
@@ -105,17 +127,37 @@ export function TabSettingsModal({
     [],
   );
 
+  // ファイル名パターン入力欄ごとの現在のカーソル位置を覚えておく
+  const patternCursor = useRef<Record<number, number>>({});
+
+  const trackCursor = useCallback((index: number, el: HTMLInputElement) => {
+    patternCursor.current[index] = el.selectionStart ?? el.value.length;
+  }, []);
+
+  // ボタンで選んだ項目を、カーソル位置に差し込む
+  const insertPlaceholder = useCallback((index: number, token: string) => {
+    setNamingRules((prev) =>
+      prev.map((rule, i) => {
+        if (i !== index) return rule;
+        const pos = patternCursor.current[index] ?? rule.pattern.length;
+        const nextPattern =
+          rule.pattern.slice(0, pos) + token + rule.pattern.slice(pos);
+        // 連続で押したときに正しい順序で挿入されるようカーソルを進める
+        patternCursor.current[index] = pos + token.length;
+        return { ...rule, pattern: nextPattern };
+      }),
+    );
+  }, []);
+
   const handleSave = async () => {
     setSaving(true);
     try {
+      // SharePoint 設定とワークフロープロンプトは UI から編集しない。
+      // body に含めないことで、既存タブの保存済みの値はそのまま保持される。
       const body = {
         name,
         icon,
         ocrPromptTemplate: ocrPrompt || null,
-        workflowPromptTemplate: workflowPrompt || null,
-        sharepointSiteId: spSiteId || null,
-        sharepointDriveId: spDriveId || null,
-        sharepointFolderPath: spFolderPath || null,
       };
 
       let savedTab: Tab;
@@ -168,8 +210,31 @@ export function TabSettingsModal({
       onClose();
     } catch (err) {
       console.error("Failed to save tab:", err);
+      setError(err instanceof Error ? err.message : "保存に失敗しました。");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!tab || isNew) return;
+    const confirmed = window.confirm(
+      `タブ「${tab.name}」を削除します。元に戻せません。よろしいですか？`,
+    );
+    if (!confirmed) return;
+
+    setDeleting(true);
+    setError(null);
+    try {
+      await apiFetch(`/tabs/${tab.id}`, { method: "DELETE" });
+      onSaved();
+      onClose();
+    } catch (err) {
+      // 処理済み書類があるタブはバックエンドがブロックし、その理由が err.message に入る
+      console.error("Failed to delete tab:", err);
+      setError(err instanceof Error ? err.message : "削除に失敗しました。");
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -219,7 +284,6 @@ export function TabSettingsModal({
         {/* Section Tabs */}
         <div className="flex gap-1 border-b border-white/10 px-6 py-2">
           {sectionButton("basic", "基本設定")}
-          {sectionButton("sharepoint", "SharePoint")}
           {sectionButton("naming", "命名規則")}
         </div>
 
@@ -271,69 +335,6 @@ export function TabSettingsModal({
                   className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-500/50"
                   placeholder="Gemini API に送る OCR 補足指示（空欄の場合はデフォルトプロンプト）"
                 />
-              </div>
-
-              {/* Workflow Prompt */}
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                  ワークフロープロンプトテンプレート
-                </label>
-                <textarea
-                  value={workflowPrompt}
-                  onChange={(e) => setWorkflowPrompt(e.target.value)}
-                  rows={3}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-500/50"
-                  placeholder="アップロード後の処理指示テンプレート"
-                />
-              </div>
-            </div>
-          )}
-
-          {activeSection === "sharepoint" && (
-            <div className="space-y-5">
-              <p className="text-sm text-slate-400">
-                このタブから保存するファイルの SharePoint 出力先を指定します。
-              </p>
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                  サイト ID
-                </label>
-                <input
-                  type="text"
-                  value={spSiteId}
-                  onChange={(e) => setSpSiteId(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-500/50"
-                  placeholder="例: load1993.sharepoint.com,3a7ec12f,..."
-                />
-                <p className="mt-1 text-xs text-slate-500">Graph API の Site ID</p>
-              </div>
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                  ドライブ ID
-                </label>
-                <input
-                  type="text"
-                  value={spDriveId}
-                  onChange={(e) => setSpDriveId(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-500/50"
-                  placeholder="例: b!L8F-OnwhAkmJ82Lc0eIxN..."
-                />
-                <p className="mt-1 text-xs text-slate-500">空欄の場合はサイトのデフォルトドライブを使用</p>
-              </div>
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                  ベースフォルダパス
-                </label>
-                <input
-                  type="text"
-                  value={spFolderPath}
-                  onChange={(e) => setSpFolderPath(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-500/50"
-                  placeholder="例: ROAD-OCR/モバイル"
-                />
-                <p className="mt-1 text-xs text-slate-500">
-                  この配下に「顧客名/契約ID」フォルダが自動生成されます
-                </p>
               </div>
             </div>
           )}
@@ -398,19 +399,61 @@ export function TabSettingsModal({
                               placeholder="例: 申込書"
                             />
                           </div>
-                          <div>
+                          <div className="sm:col-span-2">
                             <label className="mb-1 block text-xs font-medium text-slate-400">
-                              ファイル名パターン
+                              ファイル名
                             </label>
                             <input
                               type="text"
                               value={rule.pattern}
-                              onChange={(e) =>
-                                handleRuleChange(index, "pattern", e.target.value)
-                              }
+                              onChange={(e) => {
+                                trackCursor(index, e.currentTarget);
+                                handleRuleChange(index, "pattern", e.target.value);
+                              }}
+                              onSelect={(e) => trackCursor(index, e.currentTarget)}
+                              onClick={(e) => trackCursor(index, e.currentTarget)}
+                              onKeyUp={(e) => trackCursor(index, e.currentTarget)}
+                              onFocus={(e) => trackCursor(index, e.currentTarget)}
                               className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-500/50"
-                              placeholder="例: {customerName}_{contractNumber}_申込書.pdf"
+                              placeholder="下のボタンを押して項目を追加してください"
                             />
+                            {/* ボタンで項目を差し込む */}
+                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                              <span className="text-xs text-slate-500">挿入:</span>
+                              {NAMING_PLACEHOLDERS.map((ph) => (
+                                <button
+                                  type="button"
+                                  key={ph.token}
+                                  onClick={() => insertPlaceholder(index, ph.token)}
+                                  className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-xs font-medium text-cyan-300 transition-colors hover:bg-cyan-500/20"
+                                >
+                                  {ph.label}
+                                </button>
+                              ))}
+                              <button
+                                type="button"
+                                onClick={() => insertPlaceholder(index, "_")}
+                                className="rounded-md border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 transition-colors hover:bg-white/10"
+                              >
+                                _ （区切り）
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => insertPlaceholder(index, ".pdf")}
+                                className="rounded-md border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 transition-colors hover:bg-white/10"
+                              >
+                                .pdf
+                              </button>
+                            </div>
+                            {/* 実際のファイル名プレビュー */}
+                            <p className="mt-2 text-xs text-slate-400">
+                              プレビュー:{" "}
+                              <span className="font-mono text-slate-200">
+                                {rule.pattern
+                                  ? buildFileNamePreview(rule.pattern)
+                                  : "（未設定）"}
+                              </span>
+                            </p>
                           </div>
                           <div className="sm:col-span-2">
                             <label className="mb-1 block text-xs font-medium text-slate-400">
@@ -434,31 +477,60 @@ export function TabSettingsModal({
               )}
 
               <div className="rounded-lg border border-white/5 bg-white/[0.02] p-4 text-xs text-slate-500">
-                <p className="font-semibold text-slate-400 mb-1">使用可能なプレースホルダー:</p>
-                <code className="text-cyan-400">
-                  {"{customerName}"} {"{contractNumber}"} {"{applicationNumber}"} {"{documentType}"} {"{index}"} {"{date}"}
-                </code>
-                <p className="mt-1">例: <code className="text-slate-300">{"{customerName}_{contractNumber}_申込書.pdf"}</code></p>
+                <p className="font-semibold text-slate-400 mb-2">挿入できる項目の意味:</p>
+                <ul className="space-y-1">
+                  <li>・<span className="text-slate-300">顧客名</span> … 書類から読み取ったお客様の名前</li>
+                  <li>・<span className="text-slate-300">契約番号</span> … 書類の契約番号</li>
+                  <li>・<span className="text-slate-300">申込番号</span> … 書類の申込番号</li>
+                  <li>・<span className="text-slate-300">書類種別</span> … 上で設定した「書類種別」（例: 申込書）</li>
+                  <li>・<span className="text-slate-300">連番</span> … 同じ種類が複数あるときの番号（1, 2, 3…）</li>
+                  <li>・<span className="text-slate-300">日付</span> … 書類の日付</li>
+                </ul>
+                <p className="mt-2">
+                  「挿入」のボタンを押すと、ファイル名に項目が追加されます。実際にどんな名前になるかは「プレビュー」で確認できます。
+                </p>
               </div>
             </div>
           )}
         </div>
 
+        {/* エラー表示 */}
+        {error && (
+          <div className="mx-6 mb-1 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
+            {error}
+          </div>
+        )}
+
         {/* Footer */}
-        <div className="flex justify-end gap-3 border-t border-white/10 px-6 py-4">
-          <button
-            onClick={onClose}
-            className="rounded-lg px-4 py-2 text-sm font-medium text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-200"
-          >
-            キャンセル
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={!name.trim() || saving}
-            className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-cyan-500 disabled:opacity-50"
-          >
-            {saving ? "保存中..." : "保存"}
-          </button>
+        <div className="flex items-center justify-between gap-3 border-t border-white/10 px-6 py-4">
+          {/* 自分で追加したタブ（既定でない）だけ削除可。既定タブは復活するため出さない */}
+          <div>
+            {!isNew && tab && !tab.isDefault && (
+              <button
+                onClick={handleDelete}
+                disabled={deleting || saving}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-4 py-2 text-sm font-medium text-red-300 transition-colors hover:bg-red-500/10 disabled:opacity-50"
+              >
+                <Trash2 className="h-4 w-4" />
+                {deleting ? "削除中..." : "このタブを削除"}
+              </button>
+            )}
+          </div>
+          <div className="flex gap-3">
+            <button
+              onClick={onClose}
+              className="rounded-lg px-4 py-2 text-sm font-medium text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-200"
+            >
+              キャンセル
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={!name.trim() || saving || deleting}
+              className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-cyan-500 disabled:opacity-50"
+            >
+              {saving ? "保存中..." : "保存"}
+            </button>
+          </div>
         </div>
       </div>
     </div>
