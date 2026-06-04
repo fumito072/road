@@ -1,11 +1,48 @@
 "use client";
 
 import { useState } from "react";
-import { X } from "lucide-react";
+import { X, Eye, EyeOff } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 
 interface ChangePasswordModalProps {
   onClose: () => void;
+}
+
+// 目のアイコンで表示/非表示を切り替えられるパスワード入力欄
+function PasswordField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [show, setShow] = useState(false);
+  return (
+    <div>
+      <label className="mb-1.5 block text-sm font-medium text-slate-300">
+        {label}
+      </label>
+      <div className="relative">
+        <input
+          type={show ? "text" : "password"}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 pr-10 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-500/50"
+        />
+        <button
+          type="button"
+          onClick={() => setShow((s) => !s)}
+          className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-slate-400 transition-colors hover:text-slate-200"
+          title={show ? "隠す" : "表示する"}
+          tabIndex={-1}
+        >
+          {show ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export function ChangePasswordModal({ onClose }: ChangePasswordModalProps) {
@@ -69,39 +106,21 @@ export function ChangePasswordModal({ onClose }: ChangePasswordModalProps) {
                   {error}
                 </div>
               )}
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                  現在のパスワード
-                </label>
-                <input
-                  type="password"
-                  value={currentPassword}
-                  onChange={(e) => setCurrentPassword(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-500/50"
-                />
-              </div>
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                  新しいパスワード（8文字以上）
-                </label>
-                <input
-                  type="password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-500/50"
-                />
-              </div>
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                  新しいパスワード（確認）
-                </label>
-                <input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-500/50"
-                />
-              </div>
+              <PasswordField
+                label="現在のパスワード"
+                value={currentPassword}
+                onChange={setCurrentPassword}
+              />
+              <PasswordField
+                label="新しいパスワード（8文字以上）"
+                value={newPassword}
+                onChange={setNewPassword}
+              />
+              <PasswordField
+                label="新しいパスワード（確認）"
+                value={confirmPassword}
+                onChange={setConfirmPassword}
+              />
             </div>
           )}
         </div>
