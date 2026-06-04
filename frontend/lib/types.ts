@@ -1,3 +1,12 @@
+export interface User {
+  id: string;
+  email: string;
+  displayName: string | null;
+  role: "USER" | "ADMIN";
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Tab {
   id: string;
   name: string;

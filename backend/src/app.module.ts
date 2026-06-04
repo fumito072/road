@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
+import { UsersModule } from './users/users.module';
 import { TabsModule } from './tabs/tabs.module';
 import { UploadsModule } from './uploads/uploads.module';
 import { OcrModule } from './ocr/ocr.module';
@@ -13,6 +14,7 @@ import { NamingRulesModule } from './naming-rules/naming-rules.module';
     ConfigModule.forRoot({ isGlobal: true }),
     PrismaModule,
     AuthModule,
+    UsersModule,
     TabsModule,
     UploadsModule,
     OcrModule,
