@@ -3,9 +3,9 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateTabDto, UpdateTabDto } from './tabs.dto';
+import { isForeignKeyConstraintError } from '../common/prisma-errors';
 
 // SharePoint の保存先は UI から入力しないため、新規タブには既定の出力先を補完する。
 // 既定タブ（seed.ts）と同じサイト/ドライブを使い、フォルダパスは「スキャナ/タブ名」とする。
@@ -100,12 +100,9 @@ export class TabsService {
     try {
       return await this.prisma.tab.delete({ where: { id } });
     } catch (error) {
-      // 処理済みの書類（uploads）が紐づくタブは外部キー制約(P2003)で削除できない。
+      // 処理済みの書類（uploads）が紐づくタブは外部キー制約で削除できない。
       // 顧客データを巻き込んで消さないよう、分かりやすいメッセージでブロックする。
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2003'
-      ) {
+      if (isForeignKeyConstraintError(error)) {
         throw new ConflictException(
           'このタブには処理済みの書類があるため削除できません。',
         );
