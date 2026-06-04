@@ -76,7 +76,10 @@ export function UserManagementModal({ onClose }: UserManagementModalProps) {
       await apiFetch(`/users/${target.id}`, { method: "DELETE" });
       await loadUsers();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "削除に失敗しました。");
+      const message = err instanceof Error ? err.message : "削除に失敗しました。";
+      setError(message);
+      // 一覧の下の方を操作した場合、上部のエラー表示が見えないことがあるため明示する
+      window.alert(message);
     }
   };
 

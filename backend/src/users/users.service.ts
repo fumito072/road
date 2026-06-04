@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateUserDto } from './users.dto';
@@ -66,7 +67,21 @@ export class UsersService {
       }
     }
 
-    await this.prisma.user.delete({ where: { id } });
-    return { success: true };
+    try {
+      await this.prisma.user.delete({ where: { id } });
+      return { success: true };
+    } catch (error) {
+      // 処理済みの書類（uploads）が紐づくユーザーは外部キー制約(P2003)で削除できない。
+      // 書類の履歴を巻き込んで消さないよう、分かりやすいメッセージでブロックする。
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2003'
+      ) {
+        throw new BadRequestException(
+          'このユーザーには処理済みの書類があるため削除できません。',
+        );
+      }
+      throw error;
+    }
   }
 }
