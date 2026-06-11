@@ -741,8 +741,9 @@ export class UploadsService {
   }
 
   private buildTemporaryAiOcrPath(upload: Awaited<ReturnType<UploadsService['findOne']>>) {
+    // 仮格納先はタブ設定のパスに関係なく、常に「スキャナ/AI OCR」配下に固定する
     return this.joinFolderPath(
-      this.getFolderBrowserRootPath(upload),
+      'スキャナ',
       'AI OCR',
       this.sanitizePathSegment(upload.tab.name),
       this.sanitizePathSegment(upload.folderName) || upload.id,

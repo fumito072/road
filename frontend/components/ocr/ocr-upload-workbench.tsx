@@ -127,8 +127,9 @@ function uniqueStrings(values: Array<string | null | undefined>) {
   return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
 }
 
+// ファイル名に _ を使わない方針のため、使用不可文字はスペースに置き換える
 function sanitizeFileSegment(value: string) {
-  return value.trim().replace(/[\\/:*?"<>|\s]+/g, "_");
+  return value.trim().replace(/[\\/:*?"<>|]+/g, " ");
 }
 
 function normalizeYyyymmdd(value: string) {
@@ -147,10 +148,11 @@ function stripPdfExtension(value: string) {
 }
 
 function buildOutputFileName(date: string, customer: string, documentType: string) {
+  // 命名規則: 日付 社名 書類種別.pdf（区切りは _ ではなくスペース）
   const safe = [normalizeYyyymmdd(date), customer, documentType || "書類"]
     .map(sanitizeFileSegment)
     .filter(Boolean)
-    .join("_");
+    .join(" ");
 
   return safe ? `${safe}.pdf` : "";
 }
@@ -199,25 +201,10 @@ function joinFolderPath(...segments: Array<string | null | undefined>) {
     .join("/");
 }
 
-function buildFolderBrowserRoot(tab: Tab) {
-  const configuredPath = normalizeFolderPath(tab.sharepointFolderPath ?? "");
-  if (!configuredPath) {
-    return "スキャナ";
-  }
-
-  const segments = configuredPath.split("/").filter(Boolean);
-  const scannerIndex = segments.findIndex((segment) => segment === "スキャナ");
-
-  if (scannerIndex >= 0) {
-    return segments.slice(0, scannerIndex + 1).join("/");
-  }
-
-  return configuredPath;
-}
-
 function buildTemporaryAiOcrPath(tab: Tab, upload: UploadRecord) {
+  // 仮格納先はタブ設定のパスに関係なく、常に「スキャナ/AI OCR」配下に固定する
   return joinFolderPath(
-    buildFolderBrowserRoot(tab),
+    "スキャナ",
     "AI OCR",
     sanitizePathSegment(tab.name),
     sanitizePathSegment(upload.folderName) || upload.id,
@@ -254,7 +241,8 @@ function toFriendlyOcrRunError(error: unknown) {
 
 export function OcrUploadWorkbench() {
   const { user } = useAuth();
-  const inputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [queue, setQueue] = useState<QueueFile[]>([]);
   const [uploads, setUploads] = useState<UploadRecord[]>([]);
   const [isRunning, setIsRunning] = useState(false);
@@ -431,8 +419,12 @@ export function OcrUploadWorkbench() {
     [fetchUploads, hydrateEditableState],
   );
 
-  const handleOpenPicker = () => {
-    inputRef.current?.click();
+  const handleOpenFolderPicker = () => {
+    folderInputRef.current?.click();
+  };
+
+  const handleOpenFilePicker = () => {
+    fileInputRef.current?.click();
   };
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -442,8 +434,11 @@ export function OcrUploadWorkbench() {
       return;
     }
 
+    // ファイル単体追加でも、すでに選択済みのフォルダ名は上書きしない
     const folderName = extractSelectedFolderName(files);
-    setSelectedFolderName(folderName);
+    if (queue.length === 0 || folderName) {
+      setSelectedFolderName(folderName);
+    }
 
     const nextFiles = files.map((file, index) => ({
       id: `${file.name}-${file.lastModified}-${index}`,
@@ -861,26 +856,33 @@ export function OcrUploadWorkbench() {
                 </div>
 
                 <div className="p-6">
-                  <button
-                    type="button"
-                    onClick={handleOpenPicker}
-                    className="group flex min-h-[280px] w-full flex-col items-center justify-center rounded-sm border-2 border-dashed border-[#7ddde0] bg-[linear-gradient(180deg,#fafdff_0%,#eefbff_100%)] px-6 py-10 text-center transition hover:border-[#56d4d8] hover:bg-[#f4fdff]"
-                  >
+                  <div className="flex min-h-[280px] w-full flex-col items-center justify-center rounded-sm border-2 border-dashed border-[#7ddde0] bg-[linear-gradient(180deg,#fafdff_0%,#eefbff_100%)] px-6 py-10 text-center">
                     <span className="inline-flex h-20 w-20 items-center justify-center rounded-full bg-[#69dce2]/20 text-[#44cfd8]">
                       <Upload className="h-9 w-9" />
                     </span>
-                    <p className="mt-5 text-xl font-bold text-[#1f2b37]">ここにフォルダを追加</p>
-                    <p className="mt-2 max-w-md text-sm leading-6 text-[#6c7782]">一社分の書類フォルダをそのまま選択してください。フォルダ配下のファイルをまとめて OCR します。</p>
-                    <div className="mt-6 rounded-full bg-[#40d4db] px-5 py-2 text-sm font-semibold text-white shadow-sm transition group-hover:bg-[#35c7ce]">フォルダを選択</div>
+                    <p className="mt-5 text-xl font-bold text-[#1f2b37]">ここにフォルダまたはファイルを追加</p>
+                    <p className="mt-2 max-w-md text-sm leading-6 text-[#6c7782]">一社分の書類フォルダをまとめて選択するか、PDF などのファイルを 1 件ずつ（複数選択も可）追加してください。</p>
+                    <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+                      <button type="button" onClick={handleOpenFolderPicker} className="rounded-full bg-[#40d4db] px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#35c7ce]">フォルダを選択</button>
+                      <button type="button" onClick={handleOpenFilePicker} className="rounded-full border border-[#40d4db] bg-white px-5 py-2 text-sm font-semibold text-[#12919b] shadow-sm transition hover:bg-[#f3feff]">ファイルを選択</button>
+                    </div>
                     <p className="mt-4 text-xs uppercase tracking-[0.22em] text-[#8b98a6]">{acceptedFormats.join(" / ")}</p>
-                  </button>
+                  </div>
                   <input
-                    ref={inputRef}
+                    ref={folderInputRef}
                     type="file"
                     accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff"
                     className="hidden"
                     onChange={handleFileChange}
                     {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+                  />
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff"
+                    multiple
+                    className="hidden"
+                    onChange={handleFileChange}
                   />
 
                   <div className="mt-4 rounded-sm border border-[#e8edf3] bg-[#fbfcfe] p-4">
@@ -923,7 +925,7 @@ export function OcrUploadWorkbench() {
                   {queue.length > 0 && (
                     <div className="rounded-sm border border-[#e7edf3] bg-[#fbfcfe] p-4">
                       <div className="mb-3 flex items-center justify-between">
-                        <p className="font-semibold text-[#334154]">今回投入するフォルダ内容</p>
+                        <p className="font-semibold text-[#334154]">今回投入するファイル</p>
                         <span className="text-xs text-[#7c8795]">{queue.length} 件</span>
                       </div>
                       <div className="max-h-72 space-y-3 overflow-y-auto pr-1">
@@ -1091,7 +1093,7 @@ export function OcrUploadWorkbench() {
                               <FilePenLine className="h-4 w-4 text-[#12919b]" />
                               <p className="text-sm font-semibold text-[#334154]">2. アップロードファイル名の編集</p>
                             </div>
-                            <p className="mt-1 text-xs text-[#7c8795]">命名規則: 日付_社名_書類種別.pdf</p>
+                            <p className="mt-1 text-xs text-[#7c8795]">命名規則: 日付 社名 書類種別.pdf（スペース区切り）</p>
                           </div>
                           <button type="button" onClick={handleApplyFileNameTemplate} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#44cfd8] bg-white px-4 py-2 text-sm font-bold text-[#12919b] transition hover:bg-[#f3feff]">
                             <RefreshCw className="h-4 w-4" />
