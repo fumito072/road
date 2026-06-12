@@ -27,3 +27,7 @@ backend/dist/
 
 # Client-provided spec PDF — keep out of the source repo
 /OCR修正案.pdf
+/AIOCR修正.pdf
+
+# Secrets (Salesforce private key etc.) — must never be committed
+backend/.secrets/

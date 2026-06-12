@@ -314,8 +314,8 @@ export class OcrService {
     rules?: Array<{ documentType: string; pattern: string; description?: string | null }>,
   ): string {
     const baseRule = [
-      'File naming rule (STRICT): outputFileName MUST follow the pattern "{date} {customerName} {documentType}.pdf" (segments separated by single spaces, NOT underscores).',
-      '{date} is the documentDate extracted from that file in YYYYMMDD format. If documentDate is empty, leave the outputFileName prefix as an empty string (the server will fill in today). Replace sanitization characters (\\ / : * ? " < > |) with spaces. Never use underscores in outputFileName. Keep spaces inside customerName as-is.',
+      'File naming rule (STRICT): outputFileName MUST follow the pattern "{date}_{customerName}_{documentType}.pdf" (the three segments are separated by underscores).',
+      '{date} is the documentDate extracted from that file in YYYYMMDD format. If documentDate is empty, leave the outputFileName prefix as an empty string (the server will fill in today). Replace sanitization characters (\\ / : * ? " < > |) with spaces. Keep spaces inside customerName as-is (do NOT replace spaces with underscores).',
       'Do not include contractNumber, index, or the original extension. Always use the .pdf suffix.',
     ];
 
@@ -432,11 +432,11 @@ export class OcrService {
 
   private buildStandardFileName(customerName: string, documentType: string, documentDate: string) {
     const date = documentDate || this.todayYyyymmdd();
-    // 命名規則: 日付 社名 書類種別.pdf（区切りは _ ではなくスペース）
+    // 命名規則: 日付_社名_書類種別.pdf（区切りは _、社名内のスペースはそのまま保持）
     const safe = [date, customerName, documentType]
       .map((segment) => segment.trim().replace(/[\\/:*?"<>|]+/g, ' '))
       .filter(Boolean)
-      .join(' ');
+      .join('_');
 
     return `${safe}.pdf`;
   }

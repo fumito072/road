@@ -127,7 +127,7 @@ function uniqueStrings(values: Array<string | null | undefined>) {
   return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
 }
 
-// ファイル名に _ を使わない方針のため、使用不可文字はスペースに置き換える
+// 社名内に _ を入れない方針のため、使用不可文字はスペースに置き換える（区切りの _ は join 側で付与）
 function sanitizeFileSegment(value: string) {
   return value.trim().replace(/[\\/:*?"<>|]+/g, " ");
 }
@@ -148,11 +148,11 @@ function stripPdfExtension(value: string) {
 }
 
 function buildOutputFileName(date: string, customer: string, documentType: string) {
-  // 命名規則: 日付 社名 書類種別.pdf（区切りは _ ではなくスペース）
+  // 命名規則: 日付_社名_書類種別.pdf（区切りは _、社名内のスペースはそのまま保持）
   const safe = [normalizeYyyymmdd(date), customer, documentType || "書類"]
     .map(sanitizeFileSegment)
     .filter(Boolean)
-    .join(" ");
+    .join("_");
 
   return safe ? `${safe}.pdf` : "";
 }
@@ -201,15 +201,8 @@ function joinFolderPath(...segments: Array<string | null | undefined>) {
     .join("/");
 }
 
-function buildTemporaryAiOcrPath(tab: Tab, upload: UploadRecord) {
-  // 仮格納先はタブ設定のパスに関係なく、常に「スキャナ/AI OCR」配下に固定する
-  return joinFolderPath(
-    "スキャナ",
-    "AI OCR",
-    sanitizePathSegment(tab.name),
-    sanitizePathSegment(upload.folderName) || upload.id,
-  );
-}
+// 仮格納先はサブフォルダを作らず、常に既存の「スキャナ/AI OCR」直下とする
+const TEMPORARY_AI_OCR_PATH = "スキャナ/AI OCR";
 
 function folderDisplayName(path: string) {
   const segments = normalizeFolderPath(path).split("/").filter(Boolean);
@@ -288,13 +281,7 @@ export function OcrUploadWorkbench() {
     [uploads],
   );
 
-  const temporaryAiOcrPath = useMemo(() => {
-    if (!activeTab || !currentUpload) {
-      return "";
-    }
-
-    return buildTemporaryAiOcrPath(activeTab, currentUpload);
-  }, [activeTab, currentUpload]);
+  const temporaryAiOcrPath = currentUpload ? TEMPORARY_AI_OCR_PATH : "";
 
   const usesContractFields = isCollaboTab(activeTab);
   const destinationFolderRuleLabel = usesContractFields
@@ -605,8 +592,8 @@ export function OcrUploadWorkbench() {
       destinationFolderName.trim() ||
       buildNextDestinationFolderName() ||
       currentUpload?.folderName ||
-      "新規フォルダー";
-    const nextFolderName = sanitizePathSegment(rawFolderName) || "新規フォルダー";
+      "新規フォルダ";
+    const nextFolderName = sanitizePathSegment(rawFolderName) || "新規フォルダ";
     const nextPath = joinFolderPath(path, nextFolderName);
 
     setDestinationMode("new");
@@ -620,10 +607,11 @@ export function OcrUploadWorkbench() {
       return;
     }
 
-    setDestinationMode("new");
+    // スキャナ/AI OCR は既存フォルダなので、新規作成ではなく既存フォルダ保存として扱う
+    setDestinationMode("existing");
     setSharepointFolderPath(temporaryAiOcrPath);
-    setNewFolderPlan([temporaryAiOcrPath]);
-    setInfoMessage("保存先未定のため、AI OCR フォルダーへの仮格納パスを設定しました。");
+    setNewFolderPlan([]);
+    setInfoMessage("保存先未定のため、AI OCR フォルダへの仮格納パスを設定しました。");
   };
 
   const handleConfirm = async () => {
@@ -644,7 +632,7 @@ export function OcrUploadWorkbench() {
     const confirmedSharepointFolderPath = sharepointFolderPath.trim() || temporaryAiOcrPath;
 
     if (!confirmedSharepointFolderPath) {
-      setErrorMessage("保存先パスを解決するか、AI OCR フォルダーへの仮格納パスを設定してください。");
+      setErrorMessage("保存先パスを解決するか、AI OCR フォルダへの仮格納パスを設定してください。");
       return;
     }
 
@@ -690,7 +678,7 @@ export function OcrUploadWorkbench() {
       setInfoMessage(
         sharepointFolderPath.trim()
           ? "OCR 結果を確定しました。SharePoint 保存へ進めます。"
-          : "保存先未定のため AI OCR フォルダーへ仮格納する内容で確定しました。",
+          : "保存先未定のため AI OCR フォルダへ仮格納する内容で確定しました。",
       );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "確認保存に失敗しました。");
@@ -1016,7 +1004,7 @@ export function OcrUploadWorkbench() {
                     <>
                       <div className="rounded-sm border border-[#d6efef] bg-[#f7ffff] p-4">
                         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#5f7d86]">現在の保存先</p>
-                        <p className="mt-2 break-all text-sm font-semibold text-[#234152]">{sharepointFolderPath || (temporaryAiOcrPath ? "未設定（確定時はAI OCRフォルダーへ仮格納）" : "未設定")}</p>
+                        <p className="mt-2 break-all text-sm font-semibold text-[#234152]">{sharepointFolderPath || (temporaryAiOcrPath ? "未設定（確定時はAI OCRフォルダへ仮格納）" : "未設定")}</p>
                       </div>
 
                       <div className="space-y-4 rounded-sm border border-[#e5ebf1] bg-white p-4">
@@ -1093,7 +1081,7 @@ export function OcrUploadWorkbench() {
                               <FilePenLine className="h-4 w-4 text-[#12919b]" />
                               <p className="text-sm font-semibold text-[#334154]">2. アップロードファイル名の編集</p>
                             </div>
-                            <p className="mt-1 text-xs text-[#7c8795]">命名規則: 日付 社名 書類種別.pdf（スペース区切り）</p>
+                            <p className="mt-1 text-xs text-[#7c8795]">命名規則: 日付_社名_書類種別.pdf（社名内のスペースは保持）</p>
                           </div>
                           <button type="button" onClick={handleApplyFileNameTemplate} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#44cfd8] bg-white px-4 py-2 text-sm font-bold text-[#12919b] transition hover:bg-[#f3feff]">
                             <RefreshCw className="h-4 w-4" />
@@ -1213,7 +1201,7 @@ export function OcrUploadWorkbench() {
                           </button>
                           <button type="button" onClick={handleUseTemporaryAiOcrPath} disabled={!temporaryAiOcrPath} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#d5dee8] bg-white px-4 py-2 text-sm font-semibold text-[#5e6c7b] transition hover:border-[#44cfd8] disabled:cursor-not-allowed disabled:bg-[#f3f6f8] disabled:text-[#98a2ad]">
                             <FolderPlus className="h-4 w-4" />
-                            AI OCRフォルダーへ仮格納
+                            AI OCRフォルダへ仮格納
                           </button>
                         </div>
 

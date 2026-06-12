@@ -421,7 +421,7 @@ export class UploadsService {
       dto.sharepointFolderPath?.trim() ||
       (dto.ocrStructuredResult as UploadStructuredResult | undefined)?.sharepointFolderPath?.trim() ||
       currentStructured.sharepointFolderPath?.trim() ||
-      this.buildTemporaryAiOcrPath(upload);
+      this.buildTemporaryAiOcrPath();
     const nextStructured: UploadStructuredResult = {
       ...currentStructured,
       ...(dto.ocrStructuredResult as UploadStructuredResult | undefined),
@@ -740,14 +740,9 @@ export class UploadsService {
     return normalized;
   }
 
-  private buildTemporaryAiOcrPath(upload: Awaited<ReturnType<UploadsService['findOne']>>) {
-    // 仮格納先はタブ設定のパスに関係なく、常に「スキャナ/AI OCR」配下に固定する
-    return this.joinFolderPath(
-      'スキャナ',
-      'AI OCR',
-      this.sanitizePathSegment(upload.tab.name),
-      this.sanitizePathSegment(upload.folderName) || upload.id,
-    );
+  private buildTemporaryAiOcrPath() {
+    // 仮格納先はサブフォルダを作らず、常に既存の「スキャナ/AI OCR」直下とする
+    return 'スキャナ/AI OCR';
   }
 
   private normalizeFolderPath(value: string | null | undefined) {
