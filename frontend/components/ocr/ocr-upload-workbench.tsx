@@ -261,6 +261,8 @@ export function OcrUploadWorkbench() {
   const [destinationMode, setDestinationMode] = useState<"existing" | "new">("existing");
   const [destinationFolderName, setDestinationFolderName] = useState("");
   const [sharepointFolderPath, setSharepointFolderPath] = useState("");
+  // 「AI OCR フォルダへ仮格納」を優先するフラグ。true の間は確定時に必ず仮格納先を使う
+  const [useTemporaryAiOcr, setUseTemporaryAiOcr] = useState(false);
   const [editableFileResults, setEditableFileResults] = useState<EditableFileResult[]>([]);
   const [customerNameCandidates, setCustomerNameCandidates] = useState<string[]>([]);
   const [customerKanaCandidates, setCustomerKanaCandidates] = useState<string[]>([]);
@@ -447,6 +449,7 @@ export function OcrUploadWorkbench() {
   const handleSelectUpload = (upload: UploadRecord) => {
     setCurrentUpload(upload);
     hydrateEditableState(upload);
+    setUseTemporaryAiOcr(false);
     resetFolderBrowser();
     setInfoMessage(null);
     setErrorMessage(null);
@@ -582,6 +585,7 @@ export function OcrUploadWorkbench() {
   }, [currentUpload]);
 
   const handleUseExistingFolderPath = (path: string) => {
+    setUseTemporaryAiOcr(false);
     setDestinationMode("existing");
     setSharepointFolderPath(normalizeFolderPath(path));
     setNewFolderPlan([]);
@@ -596,6 +600,7 @@ export function OcrUploadWorkbench() {
     const nextFolderName = sanitizePathSegment(rawFolderName) || "新規フォルダ";
     const nextPath = joinFolderPath(path, nextFolderName);
 
+    setUseTemporaryAiOcr(false);
     setDestinationMode("new");
     setDestinationFolderName(nextFolderName);
     setSharepointFolderPath(nextPath);
@@ -608,10 +613,12 @@ export function OcrUploadWorkbench() {
     }
 
     // スキャナ/AI OCR は既存フォルダなので、新規作成ではなく既存フォルダ保存として扱う
+    // 保存先候補を解決済みでも、このボタンを押したら仮格納先を優先する
+    setUseTemporaryAiOcr(true);
     setDestinationMode("existing");
     setSharepointFolderPath(temporaryAiOcrPath);
     setNewFolderPlan([]);
-    setInfoMessage("保存先未定のため、AI OCR フォルダへの仮格納パスを設定しました。");
+    setInfoMessage("AI OCR フォルダへの仮格納を優先します。確定すると スキャナ/AI OCR に保存されます。");
   };
 
   const handleConfirm = async () => {
@@ -629,7 +636,10 @@ export function OcrUploadWorkbench() {
       return;
     }
 
-    const confirmedSharepointFolderPath = sharepointFolderPath.trim() || temporaryAiOcrPath;
+    // 仮格納を優先している場合は、解決済みの候補パスより仮格納先を必ず使う
+    const confirmedSharepointFolderPath = useTemporaryAiOcr
+      ? temporaryAiOcrPath
+      : sharepointFolderPath.trim() || temporaryAiOcrPath;
 
     if (!confirmedSharepointFolderPath) {
       setErrorMessage("保存先パスを解決するか、AI OCR フォルダへの仮格納パスを設定してください。");
@@ -676,10 +686,11 @@ export function OcrUploadWorkbench() {
       }
       setSharepointFolderPath(confirmedSharepointFolderPath);
       setInfoMessage(
-        sharepointFolderPath.trim()
-          ? "OCR 結果を確定しました。SharePoint 保存へ進めます。"
-          : "保存先未定のため AI OCR フォルダへ仮格納する内容で確定しました。",
+        useTemporaryAiOcr
+          ? "AI OCR フォルダ（スキャナ/AI OCR）へ仮格納する内容で確定しました。"
+          : "OCR 結果を確定しました。SharePoint 保存へ進めます。",
       );
+      setUseTemporaryAiOcr(false);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "確認保存に失敗しました。");
     } finally {
@@ -727,6 +738,8 @@ export function OcrUploadWorkbench() {
 
       setCurrentUpload(resolved);
       hydrateEditableState(resolved);
+      // 候補を解決し直したので仮格納の優先は解除する
+      setUseTemporaryAiOcr(false);
 
       const nextPath = resolved.ocrStructuredResult?.sharepointFolderPath ?? resolved.ocrStructuredResult?.destinationResolution?.destinationCandidates?.[0]?.absolutePath ?? "";
       if (nextPath) {
@@ -1191,7 +1204,7 @@ export function OcrUploadWorkbench() {
                         </div>
                         <div>
                           <label className="mb-1.5 block text-sm font-medium text-[#445063]">最終保存先パス</label>
-                          <input type="text" value={sharepointFolderPath} onChange={(event) => setSharepointFolderPath(event.target.value)} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
+                          <input type="text" value={sharepointFolderPath} onChange={(event) => { setUseTemporaryAiOcr(false); setSharepointFolderPath(event.target.value); }} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
                         </div>
 
                         <div className="grid gap-2 sm:grid-cols-2">
@@ -1199,15 +1212,16 @@ export function OcrUploadWorkbench() {
                             <FolderOpen className="h-4 w-4" />
                             {isBrowsingFolders && !folderBrowserPath ? "階層を取得中" : "階層表示を開く"}
                           </button>
-                          <button type="button" onClick={handleUseTemporaryAiOcrPath} disabled={!temporaryAiOcrPath} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#d5dee8] bg-white px-4 py-2 text-sm font-semibold text-[#5e6c7b] transition hover:border-[#44cfd8] disabled:cursor-not-allowed disabled:bg-[#f3f6f8] disabled:text-[#98a2ad]">
+                          <button type="button" onClick={handleUseTemporaryAiOcrPath} disabled={!temporaryAiOcrPath} className={`inline-flex items-center justify-center gap-2 rounded-sm border px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:bg-[#f3f6f8] disabled:text-[#98a2ad] ${useTemporaryAiOcr ? "border-[#44cfd8] bg-[#ebfdff] text-[#12919b]" : "border-[#d5dee8] bg-white text-[#5e6c7b] hover:border-[#44cfd8]"}`}>
                             <FolderPlus className="h-4 w-4" />
-                            AI OCRフォルダへ仮格納
+                            AI OCRフォルダへ仮格納{useTemporaryAiOcr ? "（優先中）" : ""}
                           </button>
                         </div>
 
                         {temporaryAiOcrPath && (
                           <p className="break-all rounded-sm border border-[#e7edf3] bg-[#fbfcfe] px-3 py-2 text-xs text-[#6f7d8a]">
                             仮格納先: {temporaryAiOcrPath}
+                            {useTemporaryAiOcr ? "（保存先候補より優先されます）" : ""}
                           </p>
                         )}
 
@@ -1279,12 +1293,12 @@ export function OcrUploadWorkbench() {
                         ) : (
                           <div className="max-h-80 space-y-2 overflow-y-auto overscroll-contain pr-1">
                             {destinationCandidates.map((candidate) => {
-                              const isSelected = sharepointFolderPath === candidate.absolutePath;
+                              const isSelected = !useTemporaryAiOcr && sharepointFolderPath === candidate.absolutePath;
                               return (
                                 <button
                                   key={candidate.absolutePath}
                                   type="button"
-                                  onClick={() => setSharepointFolderPath(candidate.absolutePath)}
+                                  onClick={() => { setUseTemporaryAiOcr(false); setSharepointFolderPath(candidate.absolutePath); }}
                                   className={`flex w-full flex-col items-start rounded-sm border px-4 py-3 text-left transition ${isSelected ? "border-[#44cfd8] bg-[#ebfdff]" : "border-[#dbe4ec] bg-white hover:border-[#44cfd8]"}`}
                                 >
                                   <span className="text-sm font-semibold text-[#20303d]">{candidate.absolutePath}</span>
