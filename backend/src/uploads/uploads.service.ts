@@ -432,14 +432,8 @@ export class UploadsService {
       sharepointFolderPath: requestedSharepointFolderPath,
     };
 
-    if (!nextStructured.customerName?.trim()) {
-      throw new BadRequestException('customerName must be confirmed before uploading');
-    }
-
-    if (!nextStructured.customerKana?.trim()) {
-      throw new BadRequestException('customerKana must be confirmed before uploading');
-    }
-
+    // 共通情報（顧客名・読み方）の確認画面を廃止したため、ここでは必須にしない。
+    // SharePoint 直接保存には保存先フォルダパスだけが必須。
     if (!nextStructured.sharepointFolderPath?.trim()) {
       throw new BadRequestException('sharepointFolderPath must be confirmed before uploading');
     }

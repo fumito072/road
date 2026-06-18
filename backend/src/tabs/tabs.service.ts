@@ -19,6 +19,10 @@ const DEFAULT_SHAREPOINT_DRIVE_ID =
 const DEFAULT_SHAREPOINT_BASE_PATH =
   process.env.DEFAULT_SHAREPOINT_BASE_PATH ?? 'スキャナ';
 
+// 商材ごとのタブを廃止し、すべて 1 画面（既定の 1 設定）で扱うための既定タブ名。
+// この 1 タブを裏で使い回し、OCR と SharePoint フォルダ閲覧の基準にする。
+const DEFAULT_TAB_NAME = process.env.DEFAULT_TAB_NAME ?? 'AI OCR';
+
 const defaultTabs = [
   {
     name: 'コラボ',
@@ -74,6 +78,30 @@ export class TabsService {
     const tab = await this.prisma.tab.findUnique({ where: { id } });
     if (!tab) throw new NotFoundException('Tab not found');
     return tab;
+  }
+
+  // 簡素化後のフロントが使う唯一のタブ。無ければ既定の SharePoint 設定で作成する。
+  // フォルダ閲覧のルートが「スキャナ」になるよう folderPath は「スキャナ/AI OCR」とする。
+  async getOrCreateDefaultTab() {
+    const existing = await this.prisma.tab.findFirst({
+      where: { name: DEFAULT_TAB_NAME },
+    });
+    if (existing) {
+      return existing;
+    }
+
+    return this.prisma.tab.create({
+      data: {
+        name: DEFAULT_TAB_NAME,
+        order: -1,
+        isDefault: true,
+        isActive: true,
+        icon: 'scan',
+        sharepointSiteId: DEFAULT_SHAREPOINT_SITE_ID,
+        sharepointDriveId: DEFAULT_SHAREPOINT_DRIVE_ID,
+        sharepointFolderPath: `${DEFAULT_SHAREPOINT_BASE_PATH}/AI OCR`,
+      },
+    });
   }
 
   create(dto: CreateTabDto) {

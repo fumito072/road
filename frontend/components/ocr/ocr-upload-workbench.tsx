@@ -1,19 +1,18 @@
 "use client";
 
-import type { ChangeEvent } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, DragEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CalendarDays,
-  ChevronLeft,
   CheckCircle2,
+  ChevronLeft,
   CircleAlert,
   CircleEllipsis,
   ExternalLink,
   FilePenLine,
-  FileScan,
   FolderCheck,
   FolderOpen,
-  FolderPlus,
+  HardDriveDownload,
   Home,
   Play,
   RefreshCw,
@@ -21,16 +20,11 @@ import {
   Send,
   Trash2,
   Upload,
-  UserRound,
 } from "lucide-react";
 
 import { acceptedFormats } from "@/data/ocr";
-import { useAuth } from "@/components/auth/auth-provider";
-import { TabBar } from "@/components/tabs/tab-bar";
-import { TabSettingsModal } from "@/components/tabs/tab-settings-modal";
 import { apiFetch, apiFetchBlob } from "@/lib/api";
 import type {
-  DestinationCandidate,
   SharepointFolderBrowserResult,
   SharepointFolderOption,
   Tab,
@@ -38,6 +32,15 @@ import type {
   UploadRecord,
   UploadStructuredResult,
 } from "@/lib/types";
+
+// File System Access API（Chrome/Edge）。フォルダを選んで直接書き込むために使う。
+declare global {
+  interface Window {
+    showDirectoryPicker?: (options?: {
+      mode?: "read" | "readwrite";
+    }) => Promise<FileSystemDirectoryHandle>;
+  }
+}
 
 type QueueStatus = "ready" | "processing" | "completed";
 
@@ -58,6 +61,8 @@ type EditableFileResult = {
   confidence: number;
   reason: string;
 };
+
+type DestinationKind = "local" | "sharepoint";
 
 const statusLabel: Record<QueueStatus, string> = {
   ready: "待機中",
@@ -81,6 +86,13 @@ const uploadStatusLabel: Record<UploadRecord["status"], string> = {
   ERROR: "エラー",
 };
 
+const ACCEPTED_EXTENSIONS = ["pdf", "png", "jpg", "jpeg", "tif", "tiff"];
+
+function isAcceptedFile(name: string) {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  return ACCEPTED_EXTENSIONS.includes(ext);
+}
+
 function formatBytes(bytes: number) {
   if (bytes >= 1024 * 1024) {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -89,19 +101,15 @@ function formatBytes(bytes: number) {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-function buildFolderName(tabName: string) {
+function buildFolderName(prefix: string) {
   const timestamp = new Date().toISOString().replace(/[.:]/g, "-");
-  return `${tabName}-${timestamp}`;
+  return `${prefix}-${timestamp}`;
 }
 
-function extractSelectedFolderName(files: File[]) {
-  const firstFile = files[0] as File & { webkitRelativePath?: string };
-  const relativePath = firstFile.webkitRelativePath?.trim();
-
-  if (relativePath && relativePath.includes("/")) {
+function topFolderName(relativePath: string) {
+  if (relativePath.includes("/")) {
     return relativePath.split("/")[0];
   }
-
   return "";
 }
 
@@ -121,10 +129,6 @@ function buildEditableFileResults(upload: UploadRecord): EditableFileResult[] {
       reason: current?.reason ?? "",
     };
   });
-}
-
-function uniqueStrings(values: Array<string | null | undefined>) {
-  return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
 }
 
 // 社名内に _ を入れない方針のため、使用不可文字はスペースに置き換える（区切りの _ は join 側で付与）
@@ -157,52 +161,9 @@ function buildOutputFileName(date: string, customer: string, documentType: strin
   return safe ? `${safe}.pdf` : "";
 }
 
-function buildDestinationFolderName(date: string, contractNumber: string) {
-  const safe = [normalizeYyyymmdd(date), contractNumber]
-    .map(sanitizeFileSegment)
-    .filter(Boolean)
-    .join("_");
-
-  return safe;
-}
-
-function isCollaboTab(tab: Pick<Tab, "name"> | null | undefined) {
-  return tab?.name === "コラボ";
-}
-
-function buildDestinationFolderNameForTab(
-  tab: Pick<Tab, "name"> | null | undefined,
-  input: {
-    fileDate: string;
-    contractNumber: string;
-    destinationCustomerName: string;
-    fallbackName?: string;
-  },
-) {
-  if (isCollaboTab(tab)) {
-    return buildDestinationFolderName(input.fileDate, input.contractNumber);
-  }
-
-  return sanitizePathSegment(input.destinationCustomerName) || sanitizePathSegment(input.fallbackName ?? "");
-}
-
 function normalizeFolderPath(value: string) {
   return value.trim().replace(/^\/+|\/+$/g, "").replace(/\/+/g, "/");
 }
-
-function sanitizePathSegment(value: string) {
-  return value.trim().replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_");
-}
-
-function joinFolderPath(...segments: Array<string | null | undefined>) {
-  return segments
-    .map((segment) => normalizeFolderPath(segment ?? ""))
-    .filter(Boolean)
-    .join("/");
-}
-
-// 仮格納先はサブフォルダを作らず、常に既存の「スキャナ/AI OCR」直下とする
-const TEMPORARY_AI_OCR_PATH = "スキャナ/AI OCR";
 
 function folderDisplayName(path: string) {
   const segments = normalizeFolderPath(path).split("/").filter(Boolean);
@@ -229,165 +190,140 @@ function toFriendlyOcrRunError(error: unknown) {
     return message;
   }
 
-  return "OCR処理を開始または確認できませんでした。少し時間を置いて、アップロード一覧を更新してください。";
+  return "OCR処理を開始または確認できませんでした。少し時間を置いて、もう一度お試しください。";
+}
+
+// ドラッグ&ドロップ: フォルダの中身まで再帰的にたどってファイルを集める。
+type DroppedFile = { file: File; relativePath: string };
+
+function readAllDirectoryEntries(
+  reader: FileSystemDirectoryReader,
+): Promise<FileSystemEntry[]> {
+  return new Promise((resolve, reject) => {
+    const all: FileSystemEntry[] = [];
+    const readBatch = () => {
+      reader.readEntries((batch) => {
+        if (batch.length === 0) {
+          resolve(all);
+          return;
+        }
+        all.push(...batch);
+        readBatch();
+      }, reject);
+    };
+    readBatch();
+  });
+}
+
+async function readEntry(entry: FileSystemEntry, basePath: string): Promise<DroppedFile[]> {
+  if (entry.isFile) {
+    const fileEntry = entry as FileSystemFileEntry;
+    const file = await new Promise<File>((resolve, reject) => fileEntry.file(resolve, reject));
+    return [{ file, relativePath: `${basePath}${entry.name}` }];
+  }
+
+  if (entry.isDirectory) {
+    const dirEntry = entry as FileSystemDirectoryEntry;
+    const entries = await readAllDirectoryEntries(dirEntry.createReader());
+    const nested = await Promise.all(
+      entries.map((child) => readEntry(child, `${basePath}${entry.name}/`)),
+    );
+    return nested.flat();
+  }
+
+  return [];
+}
+
+async function extractFilesFromDataTransfer(dataTransfer: DataTransfer): Promise<DroppedFile[]> {
+  const items = Array.from(dataTransfer.items ?? []).filter((item) => item.kind === "file");
+  const entries = items
+    .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
+    .filter((entry): entry is FileSystemEntry => Boolean(entry));
+
+  if (entries.length > 0) {
+    const results = await Promise.all(entries.map((entry) => readEntry(entry, "")));
+    return results.flat();
+  }
+
+  // フォルダ非対応の場合はファイルのみフォールバック
+  return Array.from(dataTransfer.files ?? []).map((file) => ({
+    file,
+    relativePath: file.name,
+  }));
 }
 
 export function OcrUploadWorkbench() {
-  const { user } = useAuth();
   const folderInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [defaultTab, setDefaultTab] = useState<Tab | null>(null);
+  const [bootError, setBootError] = useState<string | null>(null);
+
   const [queue, setQueue] = useState<QueueFile[]>([]);
-  const [uploads, setUploads] = useState<UploadRecord[]>([]);
+  const [selectedFolderName, setSelectedFolderName] = useState("");
+  const [isDragging, setIsDragging] = useState(false);
+
+  const [currentUpload, setCurrentUpload] = useState<UploadRecord | null>(null);
   const [isRunning, setIsRunning] = useState(false);
-  const [isConfirming, setIsConfirming] = useState(false);
-  const [isSavingToSharePoint, setIsSavingToSharePoint] = useState(false);
+  const [isSavingSharepoint, setIsSavingSharepoint] = useState(false);
+  const [isSavingLocal, setIsSavingLocal] = useState(false);
   const [lastRunLabel, setLastRunLabel] = useState("未実行");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<Tab | null>(null);
-  const [settingsTab, setSettingsTab] = useState<Tab | null>(null);
-  const [isNewTab, setIsNewTab] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [currentUpload, setCurrentUpload] = useState<UploadRecord | null>(null);
-  const [selectedFolderName, setSelectedFolderName] = useState("");
-
-  const [customerKana, setCustomerKana] = useState("");
-  const [contractNumber, setContractNumber] = useState("");
-  const [applicationNumber, setApplicationNumber] = useState("");
+  // ③ ファイル名編集
   const [fileCustomerName, setFileCustomerName] = useState("");
   const [fileDate, setFileDate] = useState("");
-  const [destinationCustomerName, setDestinationCustomerName] = useState("");
-  const [destinationMode, setDestinationMode] = useState<"existing" | "new">("existing");
-  const [destinationFolderName, setDestinationFolderName] = useState("");
-  const [sharepointFolderPath, setSharepointFolderPath] = useState("");
-  // 「AI OCR フォルダへ仮格納」を優先するフラグ。true の間は確定時に必ず仮格納先を使う
-  const [useTemporaryAiOcr, setUseTemporaryAiOcr] = useState(false);
   const [editableFileResults, setEditableFileResults] = useState<EditableFileResult[]>([]);
-  const [customerNameCandidates, setCustomerNameCandidates] = useState<string[]>([]);
-  const [customerKanaCandidates, setCustomerKanaCandidates] = useState<string[]>([]);
-  const [destinationCandidates, setDestinationCandidates] = useState<DestinationCandidate[]>([]);
-  const [newFolderPlan, setNewFolderPlan] = useState<string[]>([]);
-  const [resolveWarnings, setResolveWarnings] = useState<string[]>([]);
-  const [isResolvingDestination, setIsResolvingDestination] = useState(false);
+
+  // ④ 保存先
+  const [destinationKind, setDestinationKind] = useState<DestinationKind>("local");
+
+  // ④-A ローカル（File System Access API）
+  const [localDirHandle, setLocalDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
+  const [localDirName, setLocalDirName] = useState("");
+
+  // ④-B SharePoint フォルダ選択
+  const [sharepointFolderPath, setSharepointFolderPath] = useState("");
   const [folderBrowserPath, setFolderBrowserPath] = useState("");
   const [folderBrowserParentPath, setFolderBrowserParentPath] = useState<string | null>(null);
   const [folderBrowserFolders, setFolderBrowserFolders] = useState<SharepointFolderOption[]>([]);
   const [folderBrowserRootPath, setFolderBrowserRootPath] = useState("");
   const [isBrowsingFolders, setIsBrowsingFolders] = useState(false);
   const [folderBrowserError, setFolderBrowserError] = useState<string | null>(null);
+
   const [previewFile, setPreviewFile] = useState<{ uploadId: string; fileId: string; name: string; mimeType: string } | null>(null);
 
-  const completedCount = useMemo(
-    () => uploads.filter((upload) => upload.status === "COMPLETED").length,
-    [uploads],
-  );
+  const supportsFsAccess = typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
 
-  const temporaryAiOcrPath = currentUpload ? TEMPORARY_AI_OCR_PATH : "";
-
-  const usesContractFields = isCollaboTab(activeTab);
-  const destinationFolderRuleLabel = usesContractFields
-    ? "保存フォルダ命名規則: 日付_契約ID"
-    : "保存フォルダ名は自由入力できます。共通情報の顧客名を反映できます。";
-
-  const handleSelectTab = useCallback((tab: Tab) => {
-    setActiveTab(tab);
-  }, []);
-
-  const handleSettingsClick = useCallback((tab: Tab) => {
-    setSettingsTab(tab);
-    setIsNewTab(false);
-  }, []);
-
-  const handleAddClick = useCallback(() => {
-    setSettingsTab({} as Tab);
-    setIsNewTab(true);
-  }, []);
-
-  const handleSaved = useCallback(() => {
-    setRefreshKey((value) => value + 1);
-  }, []);
-
-  const resetFolderBrowser = useCallback(() => {
-    setFolderBrowserPath("");
-    setFolderBrowserParentPath(null);
-    setFolderBrowserFolders([]);
-    setFolderBrowserRootPath("");
-    setFolderBrowserError(null);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const tab = await apiFetch<Tab>("/tabs/default");
+        setDefaultTab(tab);
+      } catch {
+        setBootError("初期設定の取得に失敗しました。ログインし直すか、ページを再読み込みしてください。");
+      }
+    })();
   }, []);
 
   const hydrateEditableState = useCallback((upload: UploadRecord) => {
     const structured = upload.ocrStructuredResult ?? {};
     const fileResults = buildEditableFileResults(upload);
     const firstDocumentDate = fileResults.find((file) => file.documentDate)?.documentDate ?? "";
-    const nextFileDate = structured.fileDate ?? firstDocumentDate;
-    const nextContractNumber = structured.contractNumber ?? upload.contractNumber ?? "";
-    const nextDestinationCustomerName = structured.destinationResolution?.customerName ?? structured.customerName ?? upload.customerName ?? "";
-    const nextDestinationMode = structured.destinationMode ?? structured.destinationResolution?.destinationMode ?? "existing";
-    const nextDestinationFolderName =
-      structured.destinationFolderName ??
-      structured.destinationResolution?.destinationFolderName ??
-      buildDestinationFolderNameForTab(activeTab, {
-        fileDate: nextFileDate,
-        contractNumber: nextContractNumber,
-        destinationCustomerName: nextDestinationCustomerName,
-        fallbackName: upload.folderName,
-      });
-    setCustomerKana(structured.customerKana ?? "");
-    setContractNumber(nextContractNumber);
-    setApplicationNumber(structured.applicationNumber ?? upload.applicationNumber ?? "");
+    setFileDate(structured.fileDate ?? firstDocumentDate);
     setFileCustomerName(structured.fileCustomerName ?? structured.customerName ?? upload.customerName ?? "");
-    setFileDate(nextFileDate);
-    setDestinationCustomerName(nextDestinationCustomerName);
-    setDestinationMode(nextDestinationMode);
-    setDestinationFolderName(nextDestinationFolderName);
-    setSharepointFolderPath(structured.sharepointFolderPath ?? "");
     setEditableFileResults(fileResults);
-    setCustomerNameCandidates(
-      uniqueStrings([...(structured.customerNameCandidates ?? []), structured.customerName, upload.customerName ?? undefined]),
-    );
-    setCustomerKanaCandidates(
-      uniqueStrings([...(structured.customerKanaCandidates ?? []), structured.customerKana]),
-    );
-    setDestinationCandidates(structured.destinationResolution?.destinationCandidates ?? []);
-    setNewFolderPlan(structured.destinationResolution?.newFolderPlan ?? []);
-    setResolveWarnings(structured.destinationResolution?.warnings ?? []);
-  }, [activeTab]);
-
-  const fetchUploads = useCallback(
-    async (tabId: string) => {
-      const data = await apiFetch<UploadRecord[]>(`/uploads?tabId=${tabId}`);
-      setUploads(data);
-      setCurrentUpload((current) => {
-        const next = current ? data.find((item) => item.id === current.id) : data[0] ?? null;
-        if (next) {
-          hydrateEditableState(next);
-        }
-        return next ?? null;
-      });
-    },
-    [hydrateEditableState],
-  );
-
-  useEffect(() => {
-    if (!activeTab) {
-      return;
-    }
-
-    setErrorMessage(null);
-    setInfoMessage(null);
-    void fetchUploads(activeTab.id);
-  }, [activeTab, fetchUploads]);
+  }, []);
 
   const waitForOcrCompletion = useCallback(
-    async (uploadId: string, tabId: string) => {
+    async (uploadId: string) => {
       for (let attempt = 0; attempt < OCR_POLL_MAX_ATTEMPTS; attempt += 1) {
         await wait(OCR_POLL_INTERVAL_MS);
 
         const latest = await apiFetch<UploadRecord>(`/uploads/${uploadId}`);
         setCurrentUpload(latest);
         hydrateEditableState(latest);
-        await fetchUploads(tabId);
 
         if (
           latest.status === "OCR_DONE" ||
@@ -403,60 +339,92 @@ export function OcrUploadWorkbench() {
         }
       }
 
-      throw new Error("OCR処理に時間がかかっています。アップロード一覧を更新すると最新状態を確認できます。");
+      throw new Error("OCR処理に時間がかかっています。少し時間を置いてもう一度お試しください。");
     },
-    [fetchUploads, hydrateEditableState],
+    [hydrateEditableState],
   );
 
-  const handleOpenFolderPicker = () => {
-    folderInputRef.current?.click();
-  };
+  const addFilesToQueue = useCallback((incoming: DroppedFile[]) => {
+    const accepted = incoming.filter((item) => isAcceptedFile(item.file.name));
+    const rejectedCount = incoming.length - accepted.length;
 
-  const handleOpenFilePicker = () => {
-    fileInputRef.current?.click();
-  };
+    if (accepted.length === 0) {
+      if (rejectedCount > 0) {
+        setErrorMessage("対応していない形式のファイルです（PDF / PNG / JPG / JPEG / TIFF のみ）。");
+      }
+      return;
+    }
+
+    setQueue((current) => {
+      const folderName = accepted.map((item) => topFolderName(item.relativePath)).find(Boolean) ?? "";
+      if (current.length === 0 || folderName) {
+        setSelectedFolderName(folderName);
+      }
+
+      const nextFiles = accepted.map((item, index) => ({
+        id: `${item.file.name}-${item.file.lastModified}-${current.length + index}`,
+        file: item.file,
+        name: item.file.name,
+        sizeLabel: formatBytes(item.file.size),
+        relativePath: item.relativePath,
+        status: "ready" as const,
+      }));
+
+      return [...current, ...nextFiles];
+    });
+
+    setErrorMessage(rejectedCount > 0 ? `${rejectedCount} 件は対応形式外のため除外しました。` : null);
+  }, []);
+
+  const handleOpenFolderPicker = () => folderInputRef.current?.click();
+  const handleOpenFilePicker = () => fileInputRef.current?.click();
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
-
     if (files.length === 0) {
       return;
     }
 
-    // ファイル単体追加でも、すでに選択済みのフォルダ名は上書きしない
-    const folderName = extractSelectedFolderName(files);
-    if (queue.length === 0 || folderName) {
-      setSelectedFolderName(folderName);
-    }
-
-    const nextFiles = files.map((file, index) => ({
-      id: `${file.name}-${file.lastModified}-${index}`,
-      file,
-      name: file.name,
-      sizeLabel: formatBytes(file.size),
-      relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath ?? file.name,
-      status: "ready" as const,
-    }));
-
-    setQueue((current) => [...current, ...nextFiles]);
+    addFilesToQueue(
+      files.map((file) => ({
+        file,
+        relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
+      })),
+    );
     event.target.value = "";
+  };
+
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    if (!isDragging) setIsDragging(true);
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = async (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragging(false);
+
+    try {
+      const dropped = await extractFilesFromDataTransfer(event.dataTransfer);
+      if (dropped.length === 0) {
+        return;
+      }
+      addFilesToQueue(dropped);
+    } catch {
+      setErrorMessage("ドラッグ&ドロップしたファイルの読み込みに失敗しました。ボタンから選択してください。");
+    }
   };
 
   const handleRemove = (id: string) => {
     setQueue((current) => current.filter((file) => file.id !== id));
   };
 
-  const handleSelectUpload = (upload: UploadRecord) => {
-    setCurrentUpload(upload);
-    hydrateEditableState(upload);
-    setUseTemporaryAiOcr(false);
-    resetFolderBrowser();
-    setInfoMessage(null);
-    setErrorMessage(null);
-  };
-
   const handleRun = async () => {
-    if (!activeTab || queue.length === 0 || isRunning) {
+    if (!defaultTab || queue.length === 0 || isRunning) {
       return;
     }
 
@@ -467,8 +435,8 @@ export function OcrUploadWorkbench() {
 
     try {
       const formData = new FormData();
-      formData.append("tabId", activeTab.id);
-      formData.append("folderName", selectedFolderName || buildFolderName(activeTab.name));
+      formData.append("tabId", defaultTab.id);
+      formData.append("folderName", selectedFolderName || buildFolderName("AI OCR"));
       queue.forEach((file) => formData.append("files", file.file));
 
       const createdUpload = await apiFetch<UploadRecord>("/uploads/intake", {
@@ -482,68 +450,23 @@ export function OcrUploadWorkbench() {
 
       setCurrentUpload(ocrUpload);
       hydrateEditableState(ocrUpload);
-      await fetchUploads(activeTab.id);
-      setInfoMessage("OCR処理を開始しました。完了まで画面上で状態を更新します。");
+      setInfoMessage("OCR処理を開始しました。完了まで状態を更新します。");
 
-      const completedUpload = await waitForOcrCompletion(ocrUpload.id, activeTab.id);
+      const completedUpload = await waitForOcrCompletion(ocrUpload.id);
 
       setCurrentUpload(completedUpload);
       hydrateEditableState(completedUpload);
       setQueue((current) => current.map((file) => ({ ...file, status: "completed" })));
-      await wait(500);
+      await wait(400);
       setQueue([]);
+      setSelectedFolderName("");
       setLastRunLabel(new Date().toLocaleString("ja-JP", { hour12: false }));
-      setInfoMessage("OCR の実行が完了しました。内容を確認して確定してください。");
+      setInfoMessage("OCRが完了しました。ファイル名を整えてから保存先を選んでください。");
     } catch (error) {
       setQueue((current) => current.map((file) => ({ ...file, status: "ready" })));
       setErrorMessage(toFriendlyOcrRunError(error));
     } finally {
       setIsRunning(false);
-    }
-  };
-
-  const buildNextDestinationFolderName = (input?: {
-    fileDate?: string;
-    contractNumber?: string;
-    destinationCustomerName?: string;
-  }) => {
-    return buildDestinationFolderNameForTab(activeTab, {
-      fileDate: input?.fileDate ?? fileDate,
-      contractNumber: input?.contractNumber ?? contractNumber,
-      destinationCustomerName: input?.destinationCustomerName ?? destinationCustomerName,
-      fallbackName: currentUpload?.folderName,
-    });
-  };
-
-  const handleDestinationCustomerNameChange = (value: string) => {
-    setDestinationCustomerName(value);
-    if (!usesContractFields) {
-      setDestinationFolderName(buildNextDestinationFolderName({ destinationCustomerName: value }));
-    }
-  };
-
-  const handleContractNumberChange = (value: string) => {
-    setContractNumber(value);
-    if (usesContractFields) {
-      setDestinationFolderName(buildNextDestinationFolderName({ contractNumber: value }));
-    }
-  };
-
-  const handleApplicationNumberChange = (value: string) => {
-    setApplicationNumber(value);
-  };
-
-  const handleFileDateChange = (value: string) => {
-    setFileDate(value);
-    if (usesContractFields) {
-      setDestinationFolderName(buildNextDestinationFolderName({ fileDate: value }));
-    }
-  };
-
-  const handleUseOcrDate = () => {
-    const nextDate = editableFileResults.find((file) => file.documentDate)?.documentDate ?? "";
-    if (nextDate) {
-      handleFileDateChange(nextDate);
     }
   };
 
@@ -555,232 +478,141 @@ export function OcrUploadWorkbench() {
         outputFileName: buildOutputFileName(fileDate, fileCustomerName, file.documentType),
       })),
     );
+    setInfoMessage("社名と日付を全ファイルのファイル名へ反映しました。個別に直すこともできます。");
   };
 
-  const handleApplyDestinationFolderName = () => {
-    setDestinationFolderName(buildNextDestinationFolderName());
-  };
-
-  const loadFolderBrowser = useCallback(async (path?: string) => {
-    if (!currentUpload) {
-      return;
-    }
-
-    setIsBrowsingFolders(true);
-    setFolderBrowserError(null);
-
-    try {
-      const normalizedPath = normalizeFolderPath(path ?? "");
-      const query = normalizedPath ? `?path=${encodeURIComponent(normalizedPath)}` : "";
-      const data = await apiFetch<SharepointFolderBrowserResult>(`/uploads/${currentUpload.id}/folders${query}`);
-      setFolderBrowserRootPath(data.rootPath);
-      setFolderBrowserPath(data.currentPath);
-      setFolderBrowserParentPath(data.parentPath);
-      setFolderBrowserFolders(data.folders);
-    } catch (error) {
-      setFolderBrowserError(error instanceof Error ? error.message : "SharePoint フォルダ階層の取得に失敗しました。");
-    } finally {
-      setIsBrowsingFolders(false);
-    }
-  }, [currentUpload]);
-
-  const handleUseExistingFolderPath = (path: string) => {
-    setUseTemporaryAiOcr(false);
-    setDestinationMode("existing");
-    setSharepointFolderPath(normalizeFolderPath(path));
-    setNewFolderPlan([]);
-  };
-
-  const handleUseFolderAsNewParent = (path: string) => {
-    const rawFolderName =
-      destinationFolderName.trim() ||
-      buildNextDestinationFolderName() ||
-      currentUpload?.folderName ||
-      "新規フォルダ";
-    const nextFolderName = sanitizePathSegment(rawFolderName) || "新規フォルダ";
-    const nextPath = joinFolderPath(path, nextFolderName);
-
-    setUseTemporaryAiOcr(false);
-    setDestinationMode("new");
-    setDestinationFolderName(nextFolderName);
-    setSharepointFolderPath(nextPath);
-    setNewFolderPlan([nextPath]);
-  };
-
-  const handleUseTemporaryAiOcrPath = () => {
-    if (!temporaryAiOcrPath) {
-      return;
-    }
-
-    // スキャナ/AI OCR は既存フォルダなので、新規作成ではなく既存フォルダ保存として扱う
-    // 保存先候補を解決済みでも、このボタンを押したら仮格納先を優先する
-    setUseTemporaryAiOcr(true);
-    setDestinationMode("existing");
-    setSharepointFolderPath(temporaryAiOcrPath);
-    setNewFolderPlan([]);
-    setInfoMessage("AI OCR フォルダへの仮格納を優先します。確定すると スキャナ/AI OCR に保存されます。");
-  };
-
-  const handleConfirm = async () => {
-    if (!currentUpload) {
-      return;
-    }
-
-    if (!customerKana.trim()) {
-      setErrorMessage("顧客名の読み方を確定してください。");
-      return;
-    }
-
-    if (!destinationCustomerName.trim()) {
-      setErrorMessage("保存先フォルダの顧客名を確定してください。");
-      return;
-    }
-
-    // 仮格納を優先している場合は、解決済みの候補パスより仮格納先を必ず使う
-    const confirmedSharepointFolderPath = useTemporaryAiOcr
-      ? temporaryAiOcrPath
-      : sharepointFolderPath.trim() || temporaryAiOcrPath;
-
-    if (!confirmedSharepointFolderPath) {
-      setErrorMessage("保存先パスを解決するか、AI OCR フォルダへの仮格納パスを設定してください。");
-      return;
-    }
-
-    setIsConfirming(true);
-    setErrorMessage(null);
-    setInfoMessage(null);
-
-    try {
-      const confirmedContractNumber = usesContractFields ? contractNumber : "";
-      const confirmedApplicationNumber = usesContractFields ? applicationNumber : "";
-      const structured: UploadStructuredResult = {
-        ...(currentUpload.ocrStructuredResult ?? {}),
-        customerName: destinationCustomerName,
-        customerKana,
-        contractNumber: confirmedContractNumber,
-        applicationNumber: confirmedApplicationNumber,
-        fileCustomerName,
-        fileDate,
-        destinationMode,
-        destinationFolderName,
-        sharepointFolderPath: confirmedSharepointFolderPath,
-        fileResults: editableFileResults as UploadFileResult[],
-      };
-
-      const confirmed = await apiFetch<UploadRecord>(`/uploads/${currentUpload.id}/confirm`, {
-        method: "POST",
-        body: JSON.stringify({
-          customerName: destinationCustomerName,
-          customerKana,
-          contractNumber: confirmedContractNumber,
-          applicationNumber: confirmedApplicationNumber,
-          sharepointFolderPath: confirmedSharepointFolderPath,
-          ocrStructuredResult: structured,
-        }),
-      });
-
-      setCurrentUpload(confirmed);
-      hydrateEditableState(confirmed);
-      if (activeTab) {
-        await fetchUploads(activeTab.id);
-      }
-      setSharepointFolderPath(confirmedSharepointFolderPath);
-      setInfoMessage(
-        useTemporaryAiOcr
-          ? "AI OCR フォルダ（スキャナ/AI OCR）へ仮格納する内容で確定しました。"
-          : "OCR 結果を確定しました。SharePoint 保存へ進めます。",
-      );
-      setUseTemporaryAiOcr(false);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "確認保存に失敗しました。");
-    } finally {
-      setIsConfirming(false);
+  const handleUseOcrDate = () => {
+    const nextDate = editableFileResults.find((file) => file.documentDate)?.documentDate ?? "";
+    if (nextDate) {
+      setFileDate(nextDate);
     }
   };
 
-  const handleResolveDestination = async () => {
-    if (!currentUpload) {
-      return;
-    }
-
-    if (!customerKana.trim()) {
-      setErrorMessage("先に顧客名の読み方を選択してください。");
-      return;
-    }
-
-    if (!destinationCustomerName.trim()) {
-      setErrorMessage("先に保存先フォルダの顧客名を確定してください。");
-      return;
-    }
-
-    if (destinationMode === "new" && !destinationFolderName.trim()) {
-      setErrorMessage("新規作成する保存フォルダ名を入力してください。");
-      return;
-    }
-
-    setIsResolvingDestination(true);
-    setErrorMessage(null);
-    setInfoMessage(null);
-
-    try {
-      const resolved = await apiFetch<UploadRecord>(`/uploads/${currentUpload.id}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({
-          customerName: destinationCustomerName,
-          contractNumber: usesContractFields ? contractNumber : "",
-          applicationNumber: usesContractFields ? applicationNumber : "",
-          customerKana,
-          destinationCustomerName,
-          destinationMode,
-          destinationFolderName,
-        }),
-      });
-
-      setCurrentUpload(resolved);
-      hydrateEditableState(resolved);
-      // 候補を解決し直したので仮格納の優先は解除する
-      setUseTemporaryAiOcr(false);
-
-      const nextPath = resolved.ocrStructuredResult?.sharepointFolderPath ?? resolved.ocrStructuredResult?.destinationResolution?.destinationCandidates?.[0]?.absolutePath ?? "";
-      if (nextPath) {
-        setSharepointFolderPath(nextPath);
+  // ④-B SharePoint フォルダ閲覧
+  const loadFolderBrowser = useCallback(
+    async (path?: string) => {
+      if (!currentUpload) {
+        return;
       }
 
-      setInfoMessage("保存先候補を解決しました。配置先パスを確認して確定してください。");
-      if (activeTab) {
-        await fetchUploads(activeTab.id);
+      setIsBrowsingFolders(true);
+      setFolderBrowserError(null);
+
+      try {
+        const normalizedPath = normalizeFolderPath(path ?? "");
+        const query = normalizedPath ? `?path=${encodeURIComponent(normalizedPath)}` : "";
+        const data = await apiFetch<SharepointFolderBrowserResult>(`/uploads/${currentUpload.id}/folders${query}`);
+        setFolderBrowserRootPath(data.rootPath);
+        setFolderBrowserPath(data.currentPath);
+        setFolderBrowserParentPath(data.parentPath);
+        setFolderBrowserFolders(data.folders);
+      } catch (error) {
+        setFolderBrowserError(error instanceof Error ? error.message : "SharePoint フォルダ階層の取得に失敗しました。");
+      } finally {
+        setIsBrowsingFolders(false);
       }
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "保存先候補の解決に失敗しました。");
-    } finally {
-      setIsResolvingDestination(false);
-    }
-  };
+    },
+    [currentUpload],
+  );
 
   const handleSaveToSharePoint = async () => {
     if (!currentUpload) {
       return;
     }
 
-    setIsSavingToSharePoint(true);
+    if (!sharepointFolderPath.trim()) {
+      setErrorMessage("SharePoint の保存先フォルダを選択してください。");
+      return;
+    }
+
+    setIsSavingSharepoint(true);
     setErrorMessage(null);
     setInfoMessage(null);
 
     try {
+      const structured: UploadStructuredResult = {
+        ...(currentUpload.ocrStructuredResult ?? {}),
+        fileCustomerName,
+        fileDate,
+        sharepointFolderPath: sharepointFolderPath.trim(),
+        fileResults: editableFileResults as UploadFileResult[],
+      };
+
+      await apiFetch<UploadRecord>(`/uploads/${currentUpload.id}/confirm`, {
+        method: "POST",
+        body: JSON.stringify({
+          sharepointFolderPath: sharepointFolderPath.trim(),
+          ocrStructuredResult: structured,
+        }),
+      });
+
       const saved = await apiFetch<UploadRecord>(`/uploads/${currentUpload.id}/sharepoint`, {
         method: "POST",
       });
 
       setCurrentUpload(saved);
       hydrateEditableState(saved);
-      if (activeTab) {
-        await fetchUploads(activeTab.id);
-      }
       setInfoMessage("SharePoint への保存が完了しました。");
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "SharePoint 保存に失敗しました。");
     } finally {
-      setIsSavingToSharePoint(false);
+      setIsSavingSharepoint(false);
+    }
+  };
+
+  // ④-A ローカルフォルダへ直接保存
+  const handleChooseLocalDir = async () => {
+    if (!supportsFsAccess || !window.showDirectoryPicker) {
+      setErrorMessage("このブラウザはフォルダへの直接保存に未対応です。Chrome または Edge をご利用ください。");
+      return;
+    }
+
+    try {
+      const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+      setLocalDirHandle(handle);
+      setLocalDirName(handle.name);
+      setErrorMessage(null);
+    } catch {
+      // ユーザーがキャンセルした場合は何もしない
+    }
+  };
+
+  const handleSaveToLocal = async () => {
+    if (!currentUpload) {
+      return;
+    }
+
+    if (!localDirHandle) {
+      setErrorMessage("先に保存先フォルダを選択してください。");
+      return;
+    }
+
+    setIsSavingLocal(true);
+    setErrorMessage(null);
+    setInfoMessage(null);
+
+    try {
+      let saved = 0;
+      for (const result of editableFileResults) {
+        const sourceFile = currentUpload.files.find((item) => item.originalFileName === result.originalFileName);
+        if (!sourceFile) {
+          continue;
+        }
+
+        const blob = await apiFetchBlob(`/uploads/${currentUpload.id}/files/${sourceFile.id}/preview`);
+        const saveName = result.outputFileName.trim() || sourceFile.originalFileName;
+        const fileHandle = await localDirHandle.getFileHandle(saveName, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        saved += 1;
+      }
+
+      setInfoMessage(`ローカルフォルダ「${localDirName}」へ ${saved} 件を直接保存しました。`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "ローカル保存に失敗しました。フォルダの権限を確認してください。");
+    } finally {
+      setIsSavingLocal(false);
     }
   };
 
@@ -789,46 +621,26 @@ export function OcrUploadWorkbench() {
   return (
     <div className="min-h-screen bg-[#f5f7fb] text-[#222b38]">
       <header className="border-b border-black/10 bg-[#2f2f31] text-white shadow-sm">
-        <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-4 py-5 lg:flex-row lg:items-start lg:justify-between lg:px-6">
+        <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-4 py-5 lg:flex-row lg:items-center lg:justify-between lg:px-6">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">OCR業務ダッシュボード</h1>
-            <p className="mt-2 text-sm text-white/70">アップロード、OCR、確認、SharePoint 保存までを一画面で実行します。</p>
+            <h1 className="text-3xl font-bold tracking-tight">AI OCR ファイル命名ツール</h1>
+            <p className="mt-2 text-sm text-white/70">アップロード → OCR → ファイル名編集 → 任意の保存先へ直接保存。</p>
           </div>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            <div className="rounded-md bg-white/10 px-3 py-2 text-sm">
-              <p className="text-[11px] uppercase tracking-[0.2em] text-white/55">受付</p>
-              <p className="mt-1 font-semibold">{uploads.length} 件</p>
-            </div>
-            <div className="rounded-md bg-white/10 px-3 py-2 text-sm">
-              <p className="text-[11px] uppercase tracking-[0.2em] text-white/55">完了</p>
-              <p className="mt-1 font-semibold">{completedCount} 件</p>
-            </div>
-            <div className="rounded-md bg-white/10 px-3 py-2 text-sm sm:col-span-2 lg:col-span-1">
-              <p className="text-[11px] uppercase tracking-[0.2em] text-white/55">最終実行</p>
-              <p className="mt-1 font-semibold">{lastRunLabel}</p>
-            </div>
+          <div className="rounded-md bg-white/10 px-3 py-2 text-sm">
+            <p className="text-[11px] uppercase tracking-[0.2em] text-white/55">最終実行</p>
+            <p className="mt-1 font-semibold">{lastRunLabel}</p>
           </div>
         </div>
       </header>
 
       <div className="mx-auto w-full max-w-7xl px-4 py-6 lg:px-6">
-        <div className="flex flex-wrap gap-2 border-b border-[#d6dde7] pb-4">
-          <TabBar
-            key={refreshKey}
-            activeTabId={activeTab?.id ?? null}
-            onSelectTab={handleSelectTab}
-            onSettingsClick={handleSettingsClick}
-            onAddClick={handleAddClick}
-            showAddButton={user?.role === "ADMIN"}
-            canManageSettings={user?.role === "ADMIN"}
-          />
-        </div>
-
-        <p className="mt-3 text-sm text-[#6a7684]">
-          先に業務タブを選んで、どの SharePoint フォルダ向けの書類かを明確にしてからアップロードします。
-        </p>
-
-        <div className="mt-4 grid gap-3">
+        <div className="grid gap-3">
+          {bootError && (
+            <div className="flex items-start gap-3 rounded-sm border border-[#f2bfd2] bg-[#fff3f8] px-4 py-3 text-sm text-[#b43a6a]">
+              <CircleAlert className="mt-0.5 h-4 w-4" />
+              <span>{bootError}</span>
+            </div>
+          )}
           {errorMessage && (
             <div className="flex items-start gap-3 rounded-sm border border-[#f2bfd2] bg-[#fff3f8] px-4 py-3 text-sm text-[#b43a6a]">
               <CircleAlert className="mt-0.5 h-4 w-4" />
@@ -843,502 +655,336 @@ export function OcrUploadWorkbench() {
           )}
         </div>
 
-        {!activeTab ? (
-          <div className="mt-10 rounded-sm border border-[#e3e8ef] bg-white p-10 text-center text-[#6a7684] shadow-sm">
-            OCR フローを開始するには、先に業務タブを選択してください。
-          </div>
-        ) : (
-          <>
-            <div className="mt-6 grid gap-6 xl:grid-cols-2">
-              <section className="overflow-hidden rounded-sm border border-[#e3e8ef] bg-white shadow-sm">
-                <div className="border-b border-[#ecf0f4] px-6 py-5">
-                  <h2 className="text-2xl font-bold text-[#1f2b37]">ファイルアップロード</h2>
-                  <p className="mt-2 text-sm text-[#6a7684]">現在の業務タブ: <span className="font-semibold text-[#1f2b37]">{activeTab.name}</span></p>
-                </div>
-
-                <div className="p-6">
-                  <div className="flex min-h-[280px] w-full flex-col items-center justify-center rounded-sm border-2 border-dashed border-[#7ddde0] bg-[linear-gradient(180deg,#fafdff_0%,#eefbff_100%)] px-6 py-10 text-center">
-                    <span className="inline-flex h-20 w-20 items-center justify-center rounded-full bg-[#69dce2]/20 text-[#44cfd8]">
-                      <Upload className="h-9 w-9" />
-                    </span>
-                    <p className="mt-5 text-xl font-bold text-[#1f2b37]">ここにフォルダまたはファイルを追加</p>
-                    <p className="mt-2 max-w-md text-sm leading-6 text-[#6c7782]">一社分の書類フォルダをまとめて選択するか、PDF などのファイルを 1 件ずつ（複数選択も可）追加してください。</p>
-                    <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-                      <button type="button" onClick={handleOpenFolderPicker} className="rounded-full bg-[#40d4db] px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#35c7ce]">フォルダを選択</button>
-                      <button type="button" onClick={handleOpenFilePicker} className="rounded-full border border-[#40d4db] bg-white px-5 py-2 text-sm font-semibold text-[#12919b] shadow-sm transition hover:bg-[#f3feff]">ファイルを選択</button>
-                    </div>
-                    <p className="mt-4 text-xs uppercase tracking-[0.22em] text-[#8b98a6]">{acceptedFormats.join(" / ")}</p>
-                  </div>
-                  <input
-                    ref={folderInputRef}
-                    type="file"
-                    accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff"
-                    className="hidden"
-                    onChange={handleFileChange}
-                    {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
-                  />
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff"
-                    multiple
-                    className="hidden"
-                    onChange={handleFileChange}
-                  />
-
-                  <div className="mt-4 rounded-sm border border-[#e8edf3] bg-[#fbfcfe] p-4">
-                    <p className="text-sm font-semibold text-[#445063]">対応フォーマット</p>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {acceptedFormats.map((format) => (
-                        <span key={format} className="rounded-full border border-[#d5dee8] bg-white px-3 py-1 text-xs font-semibold text-[#607083]">{format}</span>
-                      ))}
-                    </div>
-                    {selectedFolderName ? (
-                      <p className="mt-3 text-sm text-[#607083]">選択フォルダ: <span className="font-semibold text-[#1f2b37]">{selectedFolderName}</span></p>
-                    ) : null}
-                  </div>
-                </div>
-              </section>
-
-              <section className="overflow-hidden rounded-sm border border-[#e3e8ef] bg-white shadow-sm">
-                <div className="border-b border-[#ecf0f4] px-6 py-5">
-                  <h2 className="text-2xl font-bold text-[#1f2b37]">OCR実行</h2>
-                  <p className="mt-2 text-sm text-[#6a7684]">アップロードした書類から OCR を実行し、確認後に SharePoint へ保存します。</p>
-                </div>
-
-                <div className="space-y-5 p-6">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="rounded-sm border border-[#e4ebf2] bg-[#f8fbfd] p-4">
-                      <p className="text-sm text-[#6b7682]">選択ファイル数</p>
-                      <p className="mt-2 text-3xl font-bold text-[#1f2b37]">{queue.length}</p>
-                    </div>
-                    <div className="rounded-sm border border-[#f3d5df] bg-[#fff6f8] p-4">
-                      <p className="text-sm text-[#8f546b]">現在の状態</p>
-                      <p className="mt-2 text-lg font-bold text-[#b63b69]">{activeUploadStatus}</p>
-                    </div>
-                  </div>
-
-                  <button type="button" onClick={handleRun} disabled={queue.length === 0 || isRunning} className="inline-flex w-full items-center justify-center gap-2 rounded-sm bg-[#ea4f82] px-6 py-4 text-base font-bold text-white transition hover:bg-[#da3d72] disabled:cursor-not-allowed disabled:bg-[#f0b6ca]">
-                    {isRunning ? <CircleEllipsis className="h-5 w-5 animate-pulse" /> : <Play className="h-5 w-5" />}
-                    {isRunning ? "OCRを実行中" : "OCRを実行する"}
-                  </button>
-
-                  {queue.length > 0 && (
-                    <div className="rounded-sm border border-[#e7edf3] bg-[#fbfcfe] p-4">
-                      <div className="mb-3 flex items-center justify-between">
-                        <p className="font-semibold text-[#334154]">今回投入するファイル</p>
-                        <span className="text-xs text-[#7c8795]">{queue.length} 件</span>
-                      </div>
-                      <div className="max-h-72 space-y-3 overflow-y-auto pr-1">
-                        {queue.map((file) => (
-                          <div key={file.id} className="flex items-center justify-between gap-3 rounded-sm border border-[#e7edf3] bg-white px-4 py-3">
-                            <div>
-                              <p className="font-medium text-[#24303d]">{file.name}</p>
-                              <p className="text-xs text-[#7c8795]">{file.relativePath} ・ {file.sizeLabel}</p>
-                            </div>
-                            <div className="flex items-center gap-3">
-                              <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${queueStatusClassName[file.status]}`}>{statusLabel[file.status]}</span>
-                              <button type="button" onClick={() => handleRemove(file.id)} className="inline-flex items-center gap-1 rounded-full border border-[#e1e6ed] px-3 py-2 text-sm text-[#667282] transition hover:border-[#d25d84] hover:text-[#c64974]">
-                                <Trash2 className="h-4 w-4" />
-                                削除
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="rounded-sm border border-[#e7edf3] bg-[#fbfcfe] p-4 text-sm text-[#607083]">
-                    OCR完了後は下の確認欄でファイル名と保存先を編集します。
-                  </div>
-                </div>
-              </section>
+        <div className="mt-4 grid gap-6 xl:grid-cols-2">
+          {/* ① ファイルアップロード */}
+          <section className="overflow-hidden rounded-sm border border-[#e3e8ef] bg-white shadow-sm">
+            <div className="border-b border-[#ecf0f4] px-6 py-5">
+              <h2 className="text-2xl font-bold text-[#1f2b37]">① ファイルアップロード</h2>
+              <p className="mt-2 text-sm text-[#6a7684]">フォルダ／ファイルを選ぶか、ここへドラッグ&ドロップしてください。</p>
             </div>
 
-            <div className="mt-6 grid gap-6 xl:grid-cols-2">
-              <section className="overflow-hidden rounded-sm border border-[#e3e8ef] bg-white shadow-sm">
-                <div className="border-b border-[#ecf0f4] px-6 py-5">
-                  <h2 className="text-2xl font-bold text-[#1f2b37]">アップロード一覧</h2>
-                  <p className="mt-2 text-sm text-[#6a7684]">OCR 実行済みの案件を選ぶと、右側で確認・保存できます。</p>
+            <div className="p-6">
+              <div
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                className={`flex min-h-[280px] w-full flex-col items-center justify-center rounded-sm border-2 border-dashed px-6 py-10 text-center transition ${
+                  isDragging
+                    ? "border-[#40d4db] bg-[#e3fbff]"
+                    : "border-[#7ddde0] bg-[linear-gradient(180deg,#fafdff_0%,#eefbff_100%)]"
+                }`}
+              >
+                <span className="inline-flex h-20 w-20 items-center justify-center rounded-full bg-[#69dce2]/20 text-[#44cfd8]">
+                  <Upload className="h-9 w-9" />
+                </span>
+                <p className="mt-5 text-xl font-bold text-[#1f2b37]">
+                  {isDragging ? "ここにドロップして読み込み" : "フォルダまたはファイルをドラッグ&ドロップ"}
+                </p>
+                <p className="mt-2 max-w-md text-sm leading-6 text-[#6c7782]">
+                  デスクトップからフォルダごと、または PDF などのファイルを直接ドロップできます。ボタンからの選択も可能です。
+                </p>
+                <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+                  <button type="button" onClick={handleOpenFolderPicker} className="rounded-full bg-[#40d4db] px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#35c7ce]">フォルダを選択</button>
+                  <button type="button" onClick={handleOpenFilePicker} className="rounded-full border border-[#40d4db] bg-white px-5 py-2 text-sm font-semibold text-[#12919b] shadow-sm transition hover:bg-[#f3feff]">ファイルを選択</button>
                 </div>
-                <div className="p-6">
-                  <div className="overflow-hidden rounded-sm border border-[#e7edf3]">
-                    <table className="min-w-full divide-y divide-[#edf1f5] text-left">
-                      <thead className="bg-[#f7f9fb] text-xs uppercase tracking-[0.18em] text-[#7c8795]">
-                        <tr>
-                          <th className="px-4 py-4 font-semibold">案件</th>
-                          <th className="px-4 py-4 font-semibold">状態</th>
-                          <th className="px-4 py-4 font-semibold">件数</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#edf1f5] bg-white">
-                        {uploads.length === 0 ? (
-                          <tr>
-                            <td colSpan={3} className="px-4 py-10 text-center text-sm text-[#8a94a1]">まだアップロード履歴がありません。</td>
-                          </tr>
-                        ) : (
-                          uploads.map((upload) => {
-                            const isSelected = currentUpload?.id === upload.id;
-                            return (
-                              <tr key={upload.id} onClick={() => handleSelectUpload(upload)} className={isSelected ? "bg-[#f8fcff]" : "cursor-pointer hover:bg-[#fafcff]"}>
-                                <td className="px-4 py-4">
-                                  <div className="flex items-center gap-3">
-                                    <span className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-[#eaf8fb] text-[#47cfd8]">
-                                      <FileScan className="h-5 w-5" />
-                                    </span>
-                                    <div>
-                                      <p className="font-medium text-[#24303d]">{upload.folderName}</p>
-                                      <p className="text-xs text-[#7c8795]">{new Date(upload.createdAt).toLocaleString("ja-JP")}</p>
-                                    </div>
-                                  </div>
-                                </td>
-                                <td className="px-4 py-4 text-sm text-[#6d7885]">{uploadStatusLabel[upload.status]}</td>
-                                <td className="px-4 py-4 text-sm text-[#6d7885]">{upload.files.length} 件</td>
-                              </tr>
-                            );
-                          })
-                        )}
-                      </tbody>
-                    </table>
+                <p className="mt-4 text-xs uppercase tracking-[0.22em] text-[#8b98a6]">{acceptedFormats.join(" / ")}</p>
+              </div>
+              <input
+                ref={folderInputRef}
+                type="file"
+                accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff"
+                className="hidden"
+                onChange={handleFileChange}
+                {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+              />
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff"
+                multiple
+                className="hidden"
+                onChange={handleFileChange}
+              />
+
+              <div className="mt-4 rounded-sm border border-[#e8edf3] bg-[#fbfcfe] p-4">
+                <p className="text-sm font-semibold text-[#445063]">対応フォーマット</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {acceptedFormats.map((format) => (
+                    <span key={format} className="rounded-full border border-[#d5dee8] bg-white px-3 py-1 text-xs font-semibold text-[#607083]">{format}</span>
+                  ))}
+                </div>
+                {selectedFolderName ? (
+                  <p className="mt-3 text-sm text-[#607083]">選択フォルダ: <span className="font-semibold text-[#1f2b37]">{selectedFolderName}</span></p>
+                ) : null}
+              </div>
+            </div>
+          </section>
+
+          {/* ② OCR実行 */}
+          <section className="overflow-hidden rounded-sm border border-[#e3e8ef] bg-white shadow-sm">
+            <div className="border-b border-[#ecf0f4] px-6 py-5">
+              <h2 className="text-2xl font-bold text-[#1f2b37]">② OCR実行</h2>
+              <p className="mt-2 text-sm text-[#6a7684]">投入したファイルから OCR を実行し、ファイル名の候補を作ります。</p>
+            </div>
+
+            <div className="space-y-5 p-6">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-sm border border-[#e4ebf2] bg-[#f8fbfd] p-4">
+                  <p className="text-sm text-[#6b7682]">選択ファイル数</p>
+                  <p className="mt-2 text-3xl font-bold text-[#1f2b37]">{queue.length}</p>
+                </div>
+                <div className="rounded-sm border border-[#f3d5df] bg-[#fff6f8] p-4">
+                  <p className="text-sm text-[#8f546b]">現在の状態</p>
+                  <p className="mt-2 text-lg font-bold text-[#b63b69]">{activeUploadStatus}</p>
+                </div>
+              </div>
+
+              <button type="button" onClick={handleRun} disabled={queue.length === 0 || isRunning || !defaultTab} className="inline-flex w-full items-center justify-center gap-2 rounded-sm bg-[#ea4f82] px-6 py-4 text-base font-bold text-white transition hover:bg-[#da3d72] disabled:cursor-not-allowed disabled:bg-[#f0b6ca]">
+                {isRunning ? <CircleEllipsis className="h-5 w-5 animate-pulse" /> : <Play className="h-5 w-5" />}
+                {isRunning ? "OCRを実行中" : "OCRを実行する"}
+              </button>
+
+              {queue.length > 0 && (
+                <div className="rounded-sm border border-[#e7edf3] bg-[#fbfcfe] p-4">
+                  <div className="mb-3 flex items-center justify-between">
+                    <p className="font-semibold text-[#334154]">今回投入するファイル</p>
+                    <span className="text-xs text-[#7c8795]">{queue.length} 件</span>
+                  </div>
+                  <div className="max-h-72 space-y-3 overflow-y-auto pr-1">
+                    {queue.map((file) => (
+                      <div key={file.id} className="flex items-center justify-between gap-3 rounded-sm border border-[#e7edf3] bg-white px-4 py-3">
+                        <div className="min-w-0">
+                          <p className="truncate font-medium text-[#24303d]">{file.name}</p>
+                          <p className="truncate text-xs text-[#7c8795]">{file.relativePath} ・ {file.sizeLabel}</p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${queueStatusClassName[file.status]}`}>{statusLabel[file.status]}</span>
+                          <button type="button" onClick={() => handleRemove(file.id)} className="inline-flex items-center gap-1 rounded-full border border-[#e1e6ed] px-3 py-2 text-sm text-[#667282] transition hover:border-[#d25d84] hover:text-[#c64974]">
+                            <Trash2 className="h-4 w-4" />
+                            削除
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
-              </section>
+              )}
 
-              <section className="overflow-hidden rounded-sm border border-[#e3e8ef] bg-white shadow-sm">
-                <div className="border-b border-[#ecf0f4] px-6 py-5">
-                  <h2 className="text-2xl font-bold text-[#1f2b37]">確認・保存</h2>
-                  <p className="mt-2 text-sm text-[#6a7684]">OCR 結果を確認し、必要に応じて修正してから SharePoint へ保存します。</p>
+              <div className="rounded-sm border border-[#e7edf3] bg-[#fbfcfe] p-4 text-sm text-[#607083]">
+                OCR完了後、下の「③ ファイル名編集」「④ 保存先を選択」が表示されます。
+              </div>
+            </div>
+          </section>
+        </div>
+
+        {/* ③ + ④ */}
+        <section className="mt-6 overflow-hidden rounded-sm border border-[#e3e8ef] bg-white shadow-sm">
+          <div className="border-b border-[#ecf0f4] px-6 py-5">
+            <h2 className="text-2xl font-bold text-[#1f2b37]">③ ファイル名編集 ／ ④ 保存先を選択</h2>
+            <p className="mt-2 text-sm text-[#6a7684]">OCR 結果を確認・修正し、任意の保存先へ直接保存します。</p>
+          </div>
+
+          <div className="space-y-5 p-6">
+            {!currentUpload ? (
+              <div className="rounded-sm border border-dashed border-[#d5dee8] bg-[#fbfcfe] px-5 py-10 text-center text-sm text-[#7c8795]">
+                OCR を実行すると、ここでファイル名と保存先を編集できます。
+              </div>
+            ) : (
+              <>
+                {/* ③ ファイル名編集 */}
+                <div className="space-y-4 rounded-sm border border-[#e5ebf1] bg-[#fbfcfe] p-4">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <FilePenLine className="h-4 w-4 text-[#12919b]" />
+                        <p className="text-sm font-semibold text-[#334154]">③ アップロードファイル名の編集</p>
+                      </div>
+                      <p className="mt-1 text-xs text-[#7c8795]">命名規則: 日付_社名_書類種別.pdf（社名内のスペースは保持）。同一顧客でない場合は各ファイルを個別に直せます。</p>
+                    </div>
+                    <button type="button" onClick={handleApplyFileNameTemplate} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#44cfd8] bg-white px-4 py-2 text-sm font-bold text-[#12919b] transition hover:bg-[#f3feff]">
+                      <RefreshCw className="h-4 w-4" />
+                      ファイル名へ反映（任意）
+                    </button>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-[1fr_0.75fr_auto]">
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-[#445063]">ファイル名に使う社名</label>
+                      <input type="text" value={fileCustomerName} onChange={(event) => setFileCustomerName(event.target.value)} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-[#445063]">日付</label>
+                      <input type="text" value={fileDate} onChange={(event) => setFileDate(event.target.value)} placeholder="YYYYMMDD" className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
+                    </div>
+                    <button type="button" onClick={handleUseOcrDate} className="inline-flex items-center justify-center gap-2 self-end rounded-sm border border-[#d5dee8] bg-white px-4 py-2 text-sm font-semibold text-[#5e6c7b] transition hover:border-[#44cfd8]">
+                      <CalendarDays className="h-4 w-4" />
+                      OCR日付
+                    </button>
+                  </div>
+                  {editableFileResults.map((file, index) => {
+                    const sourceFile = currentUpload.files.find((item) => item.originalFileName === file.originalFileName);
+                    return (
+                      <div key={file.originalFileName} className="rounded-sm border border-[#e5ebf1] bg-white p-4">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!sourceFile) return;
+                            setPreviewFile({
+                              uploadId: currentUpload.id,
+                              fileId: sourceFile.id,
+                              name: sourceFile.originalFileName,
+                              mimeType: sourceFile.mimeType,
+                            });
+                          }}
+                          disabled={!sourceFile}
+                          className="text-xs text-[#127780] underline decoration-dotted underline-offset-4 hover:text-[#0e5a63] disabled:cursor-not-allowed disabled:text-[#7c8795] disabled:no-underline"
+                        >
+                          元ファイル: {file.originalFileName}
+                        </button>
+                        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                          <div>
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">書類種別</label>
+                            <input
+                              type="text"
+                              value={file.documentType}
+                              onChange={(event) => {
+                                const documentType = event.target.value;
+                                setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? {
+                                  ...item,
+                                  documentType,
+                                  outputFileName: buildOutputFileName(fileDate, fileCustomerName, documentType),
+                                } : item));
+                              }}
+                              className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]"
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">保存ファイル名（拡張子なし）</label>
+                            <div className="flex rounded-sm border border-[#d5dee8] bg-white focus-within:border-[#44cfd8]">
+                              <input
+                                type="text"
+                                value={stripPdfExtension(file.outputFileName)}
+                                onChange={(event) => setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, outputFileName: appendPdfExtension(event.target.value) } : item))}
+                                className="min-w-0 flex-1 bg-transparent px-3 py-2 text-sm text-[#1f2b37] outline-none"
+                              />
+                              <span className="border-l border-[#d5dee8] px-3 py-2 text-sm font-semibold text-[#7c8795]">.pdf</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-                <div className="space-y-5 p-6">
-                  {!currentUpload ? (
-                    <div className="rounded-sm border border-dashed border-[#d5dee8] bg-[#fbfcfe] px-5 py-10 text-center text-sm text-[#7c8795]">アップロードを選択すると OCR 結果と保存先を確認できます。</div>
+
+                {/* ④ 保存先を選択 */}
+                <div className="space-y-4 rounded-sm border border-[#e5ebf1] bg-white p-4">
+                  <div className="flex items-center gap-2">
+                    <FolderCheck className="h-4 w-4 text-[#12919b]" />
+                    <p className="text-sm font-semibold text-[#334154]">④ 保存先を選択（ダウンロードせず直接保存）</p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 rounded-sm border border-[#dbe4ec] bg-[#f7f9fb] p-1">
+                    <button type="button" onClick={() => setDestinationKind("local")} className={`inline-flex items-center justify-center gap-2 rounded-sm px-3 py-2 text-sm font-semibold transition ${destinationKind === "local" ? "bg-white text-[#20303d] shadow-sm" : "text-[#667282] hover:bg-white/70"}`}>
+                      <HardDriveDownload className="h-4 w-4" />
+                      ローカルフォルダ
+                    </button>
+                    <button type="button" onClick={() => setDestinationKind("sharepoint")} className={`inline-flex items-center justify-center gap-2 rounded-sm px-3 py-2 text-sm font-semibold transition ${destinationKind === "sharepoint" ? "bg-white text-[#20303d] shadow-sm" : "text-[#667282] hover:bg-white/70"}`}>
+                      <FolderOpen className="h-4 w-4" />
+                      SharePoint
+                    </button>
+                  </div>
+
+                  {destinationKind === "local" ? (
+                    <div className="space-y-3">
+                      {!supportsFsAccess && (
+                        <div className="rounded-sm border border-[#ecd7ac] bg-[#fff9e9] px-3 py-2 text-sm text-[#8a6732]">
+                          このブラウザはフォルダへの直接保存に未対応です。Chrome または Edge をご利用ください。
+                        </div>
+                      )}
+                      <p className="text-sm text-[#607083]">保存先フォルダを一度選ぶと、その中へリネーム済みファイルが直接書き込まれます（ダウンロードのポップアップは出ません）。</p>
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                        <button type="button" onClick={handleChooseLocalDir} disabled={!supportsFsAccess} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#44cfd8] bg-white px-4 py-2 text-sm font-bold text-[#12919b] transition hover:bg-[#f3feff] disabled:cursor-not-allowed disabled:border-[#d0d5db] disabled:text-[#98a2ad]">
+                          <FolderOpen className="h-4 w-4" />
+                          保存先フォルダを選択
+                        </button>
+                        <span className="text-sm text-[#607083]">
+                          {localDirName ? <>選択中: <span className="font-semibold text-[#1f2b37]">{localDirName}</span></> : "未選択"}
+                        </span>
+                      </div>
+                      <button type="button" onClick={handleSaveToLocal} disabled={!localDirHandle || isSavingLocal} className="inline-flex w-full items-center justify-center gap-2 rounded-sm bg-[#2f2f31] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#1f1f21] disabled:cursor-not-allowed disabled:bg-[#9da4ac]">
+                        <Save className="h-4 w-4" />
+                        {isSavingLocal ? "保存中" : "このフォルダへ直接保存する"}
+                      </button>
+                    </div>
                   ) : (
-                    <>
+                    <div className="space-y-3">
+                      <p className="text-sm text-[#607083]">SharePoint 上の任意のフォルダを選んで、その場に直接アップロードします。</p>
                       <div className="rounded-sm border border-[#d6efef] bg-[#f7ffff] p-4">
-                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#5f7d86]">現在の保存先</p>
-                        <p className="mt-2 break-all text-sm font-semibold text-[#234152]">{sharepointFolderPath || (temporaryAiOcrPath ? "未設定（確定時はAI OCRフォルダへ仮格納）" : "未設定")}</p>
+                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#5f7d86]">選択中の保存先</p>
+                        <p className="mt-2 break-all text-sm font-semibold text-[#234152]">{sharepointFolderPath || "未選択"}</p>
                       </div>
+                      <button type="button" onClick={() => void loadFolderBrowser()} disabled={isBrowsingFolders} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#44cfd8] bg-white px-4 py-2 text-sm font-bold text-[#12919b] transition hover:bg-[#f3feff] disabled:cursor-not-allowed disabled:border-[#d0d5db] disabled:text-[#98a2ad]">
+                        <FolderOpen className="h-4 w-4" />
+                        {isBrowsingFolders && !folderBrowserPath ? "階層を取得中" : "SharePoint フォルダを開く"}
+                      </button>
 
-                      <div className="space-y-4 rounded-sm border border-[#e5ebf1] bg-white p-4">
-                        <div className="flex items-center gap-2">
-                          <UserRound className="h-4 w-4 text-[#12919b]" />
-                          <p className="text-sm font-semibold text-[#334154]">1. 共通情報の確認</p>
-                        </div>
-                        <div className="grid gap-4 sm:grid-cols-2">
-                          <div>
-                            <label className="mb-1.5 block text-sm font-medium text-[#445063]">顧客名の読み方</label>
-                            <input type="text" value={customerKana} onChange={(event) => setCustomerKana(event.target.value)} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
-                          </div>
-                          <div>
-                            <label className="mb-1.5 block text-sm font-medium text-[#445063]">保存先フォルダの顧客名</label>
-                            <input type="text" value={destinationCustomerName} onChange={(event) => handleDestinationCustomerNameChange(event.target.value)} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
-                          </div>
-                          {usesContractFields && (
-                            <>
-                              <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[#445063]">契約ID</label>
-                                <input type="text" value={contractNumber} onChange={(event) => handleContractNumberChange(event.target.value)} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
-                              </div>
-                              <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[#445063]">申込番号</label>
-                                <input type="text" value={applicationNumber} onChange={(event) => handleApplicationNumberChange(event.target.value)} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
-                              </div>
-                            </>
-                          )}
-                        </div>
-                        {(customerKanaCandidates.length > 0 || customerNameCandidates.length > 0) && (
-                          <div className="grid gap-3 border-t border-[#edf1f5] pt-4">
-                            {customerKanaCandidates.length > 0 && (
-                              <div>
-                                <p className="text-xs font-semibold text-[#667282]">読み方候補</p>
-                                <div className="mt-2 flex flex-wrap gap-2">
-                                  {customerKanaCandidates.map((candidate) => (
-                                    <button
-                                      key={candidate}
-                                      type="button"
-                                      onClick={() => setCustomerKana(candidate)}
-                                      className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${customerKana === candidate ? "border-[#44cfd8] bg-[#ebfdff] text-[#127780]" : "border-[#d5dee8] bg-white text-[#5e6c7b] hover:border-[#44cfd8]"}`}
-                                    >
-                                      {candidate}
-                                    </button>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                            {customerNameCandidates.length > 0 && destinationCandidates.length === 0 && (
-                              <div>
-                                <p className="text-xs font-semibold text-[#667282]">保存先顧客名候補</p>
-                                <div className="mt-2 flex flex-wrap gap-2">
-                                  {customerNameCandidates.map((candidate) => (
-                                    <button
-                                      key={candidate}
-                                      type="button"
-                                      onClick={() => handleDestinationCustomerNameChange(candidate)}
-                                      className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${destinationCustomerName === candidate ? "border-[#44cfd8] bg-[#ebfdff] text-[#127780]" : "border-[#d5dee8] bg-white text-[#5e6c7b] hover:border-[#44cfd8]"}`}
-                                    >
-                                      {candidate}
-                                    </button>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="space-y-4 rounded-sm border border-[#e5ebf1] bg-[#fbfcfe] p-4">
-                        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <FilePenLine className="h-4 w-4 text-[#12919b]" />
-                              <p className="text-sm font-semibold text-[#334154]">2. アップロードファイル名の編集</p>
+                      {folderBrowserPath && (
+                        <div className="rounded-sm border border-[#dbe4ec] bg-[#fbfcfe] p-3">
+                          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#7c8795]">現在の階層</p>
+                              <p className="mt-1 break-all text-sm font-semibold text-[#20303d]">{folderBrowserPath}</p>
                             </div>
-                            <p className="mt-1 text-xs text-[#7c8795]">命名規則: 日付_社名_書類種別.pdf（社名内のスペースは保持）</p>
-                          </div>
-                          <button type="button" onClick={handleApplyFileNameTemplate} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#44cfd8] bg-white px-4 py-2 text-sm font-bold text-[#12919b] transition hover:bg-[#f3feff]">
-                            <RefreshCw className="h-4 w-4" />
-                            ファイル名へ反映
-                          </button>
-                        </div>
-                        <div className="grid gap-3 sm:grid-cols-[1fr_0.75fr_auto]">
-                          <div>
-                            <label className="mb-1.5 block text-sm font-medium text-[#445063]">ファイル名に使う社名</label>
-                            <input type="text" value={fileCustomerName} onChange={(event) => setFileCustomerName(event.target.value)} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
-                          </div>
-                          <div>
-                            <label className="mb-1.5 block text-sm font-medium text-[#445063]">日付</label>
-                            <input type="text" value={fileDate} onChange={(event) => handleFileDateChange(event.target.value)} placeholder="YYYYMMDD" className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
-                          </div>
-                          <button type="button" onClick={handleUseOcrDate} className="inline-flex items-center justify-center gap-2 self-end rounded-sm border border-[#d5dee8] bg-white px-4 py-2 text-sm font-semibold text-[#5e6c7b] transition hover:border-[#44cfd8]">
-                            <CalendarDays className="h-4 w-4" />
-                            OCR日付
-                          </button>
-                        </div>
-                        {editableFileResults.map((file, index) => {
-                          const sourceFile = currentUpload?.files.find((item) => item.originalFileName === file.originalFileName);
-                          return (
-                            <div key={file.originalFileName} className="rounded-sm border border-[#e5ebf1] bg-white p-4">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (!sourceFile || !currentUpload) return;
-                                  setPreviewFile({
-                                    uploadId: currentUpload.id,
-                                    fileId: sourceFile.id,
-                                    name: sourceFile.originalFileName,
-                                    mimeType: sourceFile.mimeType,
-                                  });
-                                }}
-                                disabled={!sourceFile}
-                                className="text-xs text-[#127780] underline decoration-dotted underline-offset-4 hover:text-[#0e5a63] disabled:cursor-not-allowed disabled:text-[#7c8795] disabled:no-underline"
-                              >
-                                元ファイル: {file.originalFileName}
+                            <div className="flex flex-wrap gap-2">
+                              <button type="button" onClick={() => void loadFolderBrowser()} disabled={isBrowsingFolders || folderBrowserPath === folderBrowserRootPath} className="inline-flex items-center gap-1 rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-xs font-semibold text-[#5e6c7b] transition hover:border-[#44cfd8] disabled:cursor-not-allowed disabled:bg-[#f3f6f8] disabled:text-[#98a2ad]">
+                                <Home className="h-3.5 w-3.5" />
+                                ルート
                               </button>
-                              <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                                <div>
-                                  <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">書類種別</label>
-                                  <input
-                                    type="text"
-                                    value={file.documentType}
-                                    onChange={(event) => {
-                                      const documentType = event.target.value;
-                                      setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? {
-                                        ...item,
-                                        documentType,
-                                        outputFileName: buildOutputFileName(fileDate, fileCustomerName, documentType),
-                                      } : item));
-                                    }}
-                                    className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">保存ファイル名（拡張子なし）</label>
-                                  <div className="flex rounded-sm border border-[#d5dee8] bg-white focus-within:border-[#44cfd8]">
-                                    <input
-                                      type="text"
-                                      value={stripPdfExtension(file.outputFileName)}
-                                      onChange={(event) => setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, outputFileName: appendPdfExtension(event.target.value) } : item))}
-                                      className="min-w-0 flex-1 bg-transparent px-3 py-2 text-sm text-[#1f2b37] outline-none"
-                                    />
-                                    <span className="border-l border-[#d5dee8] px-3 py-2 text-sm font-semibold text-[#7c8795]">.pdf</span>
-                                  </div>
-                                </div>
-                              </div>
+                              <button type="button" onClick={() => folderBrowserParentPath ? void loadFolderBrowser(folderBrowserParentPath) : undefined} disabled={isBrowsingFolders || !folderBrowserParentPath} className="inline-flex items-center gap-1 rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-xs font-semibold text-[#5e6c7b] transition hover:border-[#44cfd8] disabled:cursor-not-allowed disabled:bg-[#f3f6f8] disabled:text-[#98a2ad]">
+                                <ChevronLeft className="h-3.5 w-3.5" />
+                                上へ
+                              </button>
+                              <button type="button" onClick={() => setSharepointFolderPath(folderBrowserPath)} className="inline-flex items-center gap-1 rounded-sm border border-[#44cfd8] bg-white px-3 py-2 text-xs font-bold text-[#12919b] transition hover:bg-[#f3feff]">
+                                <FolderCheck className="h-3.5 w-3.5" />
+                                ここを保存先にする
+                              </button>
                             </div>
-                          );
-                        })}
-                      </div>
-
-                      <div className="space-y-4 rounded-sm border border-[#e5ebf1] bg-white p-4">
-                        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <FolderCheck className="h-4 w-4 text-[#12919b]" />
-                              <p className="text-sm font-semibold text-[#334154]">3. 保存フォルダ名の編集</p>
-                            </div>
-                            <p className="mt-1 text-xs text-[#7c8795]">{destinationFolderRuleLabel}</p>
                           </div>
-                          <button type="button" onClick={handleResolveDestination} disabled={!currentUpload || isResolvingDestination || isRunning} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#44cfd8] bg-white px-4 py-2 text-sm font-bold text-[#12919b] transition hover:bg-[#f3feff] disabled:cursor-not-allowed disabled:border-[#d0d5db] disabled:text-[#98a2ad]">
-                            <FileScan className="h-4 w-4" />
-                            {isResolvingDestination ? "保存先候補を解決中" : "保存先候補を解決する"}
-                          </button>
-                        </div>
-                        <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-                          <div>
-                            <label className="mb-1.5 block text-sm font-medium text-[#445063]">保存フォルダ名</label>
-                            <input type="text" value={destinationFolderName} onChange={(event) => setDestinationFolderName(event.target.value)} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
-                          </div>
-                          <button type="button" onClick={handleApplyDestinationFolderName} className="inline-flex items-center justify-center gap-2 self-end rounded-sm border border-[#d5dee8] bg-white px-4 py-2 text-sm font-semibold text-[#5e6c7b] transition hover:border-[#44cfd8]">
-                            <RefreshCw className="h-4 w-4" />
-                            {usesContractFields ? "日付_契約ID" : "共通情報を反映"}
-                          </button>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2 rounded-sm border border-[#dbe4ec] bg-[#f7f9fb] p-1">
-                          <button type="button" onClick={() => setDestinationMode("existing")} className={`rounded-sm px-3 py-2 text-sm font-semibold transition ${destinationMode === "existing" ? "bg-white text-[#20303d] shadow-sm" : "text-[#667282] hover:bg-white/70"}`}>
-                            既存フォルダに保存
-                          </button>
-                          <button type="button" onClick={() => setDestinationMode("new")} className={`rounded-sm px-3 py-2 text-sm font-semibold transition ${destinationMode === "new" ? "bg-white text-[#20303d] shadow-sm" : "text-[#667282] hover:bg-white/70"}`}>
-                            新規フォルダを作成
-                          </button>
-                        </div>
-                        <div>
-                          <label className="mb-1.5 block text-sm font-medium text-[#445063]">最終保存先パス</label>
-                          <input type="text" value={sharepointFolderPath} onChange={(event) => { setUseTemporaryAiOcr(false); setSharepointFolderPath(event.target.value); }} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
-                        </div>
 
-                        <div className="grid gap-2 sm:grid-cols-2">
-                          <button type="button" onClick={() => void loadFolderBrowser()} disabled={!currentUpload || isBrowsingFolders} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#44cfd8] bg-white px-4 py-2 text-sm font-bold text-[#12919b] transition hover:bg-[#f3feff] disabled:cursor-not-allowed disabled:border-[#d0d5db] disabled:text-[#98a2ad]">
-                            <FolderOpen className="h-4 w-4" />
-                            {isBrowsingFolders && !folderBrowserPath ? "階層を取得中" : "階層表示を開く"}
-                          </button>
-                          <button type="button" onClick={handleUseTemporaryAiOcrPath} disabled={!temporaryAiOcrPath} className={`inline-flex items-center justify-center gap-2 rounded-sm border px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:bg-[#f3f6f8] disabled:text-[#98a2ad] ${useTemporaryAiOcr ? "border-[#44cfd8] bg-[#ebfdff] text-[#12919b]" : "border-[#d5dee8] bg-white text-[#5e6c7b] hover:border-[#44cfd8]"}`}>
-                            <FolderPlus className="h-4 w-4" />
-                            AI OCRフォルダへ仮格納{useTemporaryAiOcr ? "（優先中）" : ""}
-                          </button>
-                        </div>
-
-                        {temporaryAiOcrPath && (
-                          <p className="break-all rounded-sm border border-[#e7edf3] bg-[#fbfcfe] px-3 py-2 text-xs text-[#6f7d8a]">
-                            仮格納先: {temporaryAiOcrPath}
-                            {useTemporaryAiOcr ? "（保存先候補より優先されます）" : ""}
-                          </p>
-                        )}
-
-                        {folderBrowserPath && (
-                          <div className="rounded-sm border border-[#dbe4ec] bg-[#fbfcfe] p-3">
-                            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                              <div>
-                                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#7c8795]">階層表示ドリルダウン</p>
-                                <p className="mt-1 break-all text-sm font-semibold text-[#20303d]">{folderBrowserPath}</p>
-                              </div>
-                              <div className="flex flex-wrap gap-2">
-                                <button type="button" onClick={() => void loadFolderBrowser()} disabled={isBrowsingFolders || folderBrowserPath === folderBrowserRootPath} className="inline-flex items-center gap-1 rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-xs font-semibold text-[#5e6c7b] transition hover:border-[#44cfd8] disabled:cursor-not-allowed disabled:bg-[#f3f6f8] disabled:text-[#98a2ad]">
-                                  <Home className="h-3.5 w-3.5" />
-                                  ルート
-                                </button>
-                                <button type="button" onClick={() => folderBrowserParentPath ? void loadFolderBrowser(folderBrowserParentPath) : undefined} disabled={isBrowsingFolders || !folderBrowserParentPath} className="inline-flex items-center gap-1 rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-xs font-semibold text-[#5e6c7b] transition hover:border-[#44cfd8] disabled:cursor-not-allowed disabled:bg-[#f3f6f8] disabled:text-[#98a2ad]">
-                                  <ChevronLeft className="h-3.5 w-3.5" />
-                                  上へ
-                                </button>
-                                <button type="button" onClick={() => handleUseExistingFolderPath(folderBrowserPath)} className="inline-flex items-center gap-1 rounded-sm border border-[#44cfd8] bg-white px-3 py-2 text-xs font-bold text-[#12919b] transition hover:bg-[#f3feff]">
-                                  <FolderCheck className="h-3.5 w-3.5" />
-                                  現在地を保存先
-                                </button>
-                                <button type="button" onClick={() => handleUseFolderAsNewParent(folderBrowserPath)} className="inline-flex items-center gap-1 rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-xs font-semibold text-[#5e6c7b] transition hover:border-[#44cfd8]">
-                                  <FolderPlus className="h-3.5 w-3.5" />
-                                  現在地配下に新規
-                                </button>
-                              </div>
+                          {folderBrowserError && (
+                            <div className="mt-3 rounded-sm border border-[#f2bfd2] bg-[#fff3f8] px-3 py-2 text-sm text-[#b43a6a]">
+                              {folderBrowserError}
                             </div>
+                          )}
 
-                            {folderBrowserError && (
-                              <div className="mt-3 rounded-sm border border-[#f2bfd2] bg-[#fff3f8] px-3 py-2 text-sm text-[#b43a6a]">
-                                {folderBrowserError}
-                              </div>
+                          <div className="mt-3 max-h-56 space-y-2 overflow-y-auto overscroll-contain pr-1">
+                            {isBrowsingFolders ? (
+                              <div className="rounded-sm border border-[#e7edf3] bg-white px-3 py-4 text-sm text-[#7c8795]">フォルダを取得しています。</div>
+                            ) : folderBrowserFolders.length === 0 ? (
+                              <div className="rounded-sm border border-[#e7edf3] bg-white px-3 py-4 text-sm text-[#7c8795]">この階層に表示できるフォルダはありません。</div>
+                            ) : (
+                              folderBrowserFolders.map((folder) => (
+                                <div key={folder.id} className="grid gap-2 rounded-sm border border-[#e7edf3] bg-white p-3 lg:grid-cols-[1fr_auto] lg:items-center">
+                                  <button type="button" onClick={() => void loadFolderBrowser(folder.path)} className="min-w-0 text-left transition hover:text-[#12919b]">
+                                    <span className="flex items-center gap-2 text-sm font-semibold text-[#20303d]">
+                                      <FolderOpen className="h-4 w-4 shrink-0 text-[#12919b]" />
+                                      <span className="truncate">{folder.name || folderDisplayName(folder.path)}</span>
+                                    </span>
+                                    <span className="mt-1 block break-all text-xs text-[#7c8795]">{folder.path}</span>
+                                  </button>
+                                  <button type="button" onClick={() => setSharepointFolderPath(folder.path)} className="rounded-sm border border-[#44cfd8] bg-white px-3 py-2 text-xs font-bold text-[#12919b] transition hover:bg-[#f3feff]">
+                                    保存先にする
+                                  </button>
+                                </div>
+                              ))
                             )}
-
-                            <div className="mt-3 max-h-56 space-y-2 overflow-y-auto overscroll-contain pr-1">
-                              {isBrowsingFolders ? (
-                                <div className="rounded-sm border border-[#e7edf3] bg-white px-3 py-4 text-sm text-[#7c8795]">フォルダを取得しています。</div>
-                              ) : folderBrowserFolders.length === 0 ? (
-                                <div className="rounded-sm border border-[#e7edf3] bg-white px-3 py-4 text-sm text-[#7c8795]">この階層に表示できるフォルダはありません。</div>
-                              ) : (
-                                folderBrowserFolders.map((folder) => (
-                                  <div key={folder.id} className="grid gap-2 rounded-sm border border-[#e7edf3] bg-white p-3 lg:grid-cols-[1fr_auto] lg:items-center">
-                                    <button type="button" onClick={() => void loadFolderBrowser(folder.path)} className="min-w-0 text-left transition hover:text-[#12919b]">
-                                      <span className="flex items-center gap-2 text-sm font-semibold text-[#20303d]">
-                                        <FolderOpen className="h-4 w-4 shrink-0 text-[#12919b]" />
-                                        <span className="truncate">{folder.name || folderDisplayName(folder.path)}</span>
-                                      </span>
-                                      <span className="mt-1 block break-all text-xs text-[#7c8795]">{folder.path}</span>
-                                    </button>
-                                    <div className="flex flex-wrap gap-2">
-                                      <button type="button" onClick={() => handleUseExistingFolderPath(folder.path)} className="rounded-sm border border-[#44cfd8] bg-white px-3 py-2 text-xs font-bold text-[#12919b] transition hover:bg-[#f3feff]">
-                                        保存先にする
-                                      </button>
-                                      <button type="button" onClick={() => handleUseFolderAsNewParent(folder.path)} className="rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-xs font-semibold text-[#5e6c7b] transition hover:border-[#44cfd8]">
-                                        配下に新規
-                                      </button>
-                                    </div>
-                                  </div>
-                                ))
-                              )}
-                            </div>
                           </div>
-                        )}
+                        </div>
+                      )}
 
-                        {destinationCandidates.length === 0 ? (
-                          <p className="text-sm text-[#7c8795]">保存先候補はまだ解決されていません。</p>
-                        ) : (
-                          <div className="max-h-80 space-y-2 overflow-y-auto overscroll-contain pr-1">
-                            {destinationCandidates.map((candidate) => {
-                              const isSelected = !useTemporaryAiOcr && sharepointFolderPath === candidate.absolutePath;
-                              return (
-                                <button
-                                  key={candidate.absolutePath}
-                                  type="button"
-                                  onClick={() => { setUseTemporaryAiOcr(false); setSharepointFolderPath(candidate.absolutePath); }}
-                                  className={`flex w-full flex-col items-start rounded-sm border px-4 py-3 text-left transition ${isSelected ? "border-[#44cfd8] bg-[#ebfdff]" : "border-[#dbe4ec] bg-white hover:border-[#44cfd8]"}`}
-                                >
-                                  <span className="text-sm font-semibold text-[#20303d]">{candidate.absolutePath}</span>
-                                  <span className="mt-1 text-xs text-[#6f7d8a]">{candidate.reason}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-
-                        {newFolderPlan.length > 0 && (
-                          <div className="rounded-sm border border-[#f3d5df] bg-[#fff7f9] p-4">
-                            <p className="text-sm font-semibold text-[#8f546b]">新規作成予定階層</p>
-                            <div className="mt-2 space-y-1 text-sm text-[#8f546b]">
-                              {newFolderPlan.map((path) => (
-                                <p key={path}>{path}</p>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
-                        {resolveWarnings.length > 0 && (
-                          <div className="rounded-sm border border-[#ecd7ac] bg-[#fff9e9] p-4 text-sm text-[#8a6732]">
-                            {resolveWarnings.map((warning) => (
-                              <p key={warning}>{warning}</p>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="flex flex-col gap-3 rounded-sm border border-[#e5ebf1] bg-[#fbfcfe] p-4 sm:flex-row sm:justify-end">
-                        <button type="button" onClick={handleConfirm} disabled={!currentUpload || isConfirming || isRunning} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#2f2f31] bg-white px-5 py-3 text-sm font-bold text-[#2f2f31] transition hover:bg-[#f4f6f8] disabled:cursor-not-allowed disabled:border-[#d0d5db] disabled:text-[#98a2ad]">
-                          <Save className="h-4 w-4" />
-                          {isConfirming ? "アップロード内容を確定中" : "アップロード内容を確定する"}
-                        </button>
-                        <button type="button" onClick={handleSaveToSharePoint} disabled={!currentUpload || currentUpload.status !== "CONFIRMED" || isSavingToSharePoint || isRunning} className="inline-flex items-center justify-center gap-2 rounded-sm bg-[#2f2f31] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#1f1f21] disabled:cursor-not-allowed disabled:bg-[#9da4ac]">
-                          <Send className="h-4 w-4" />
-                          {isSavingToSharePoint ? "アップロード中" : "アップロードする"}
-                        </button>
-                      </div>
+                      <button type="button" onClick={handleSaveToSharePoint} disabled={!sharepointFolderPath.trim() || isSavingSharepoint} className="inline-flex w-full items-center justify-center gap-2 rounded-sm bg-[#2f2f31] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#1f1f21] disabled:cursor-not-allowed disabled:bg-[#9da4ac]">
+                        <Send className="h-4 w-4" />
+                        {isSavingSharepoint ? "アップロード中" : "この SharePoint フォルダへ保存する"}
+                      </button>
 
                       {currentUpload.sharepointWebUrl && (
                         <div className="flex justify-end">
@@ -1348,23 +994,14 @@ export function OcrUploadWorkbench() {
                           </a>
                         </div>
                       )}
-                    </>
+                    </div>
                   )}
                 </div>
-              </section>
-            </div>
-          </>
-        )}
+              </>
+            )}
+          </div>
+        </section>
       </div>
-
-      {settingsTab && (
-        <TabSettingsModal
-          tab={isNewTab ? null : settingsTab}
-          isNew={isNewTab}
-          onClose={() => setSettingsTab(null)}
-          onSaved={handleSaved}
-        />
-      )}
 
       {previewFile && (
         <FilePreviewModal

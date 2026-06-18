@@ -23,6 +23,12 @@ export class TabsController {
     return this.tabsService.findAll();
   }
 
+  // 簡素化後の単一画面が使う既定タブ。':id' より前に置く必要がある。
+  @Get('default')
+  getDefault() {
+    return this.tabsService.getOrCreateDefaultTab();
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.tabsService.findOne(id);
