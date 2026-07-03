@@ -8,6 +8,8 @@ import { UploadsModule } from './uploads/uploads.module';
 import { OcrModule } from './ocr/ocr.module';
 import { SharepointModule } from './sharepoint/sharepoint.module';
 import { NamingRulesModule } from './naming-rules/naming-rules.module';
+import { MemberCheckModule } from './member-check/member-check.module';
+import { KeiriOcrModule } from './keiri-ocr/keiri-ocr.module';
 
 @Module({
   imports: [
@@ -20,6 +22,8 @@ import { NamingRulesModule } from './naming-rules/naming-rules.module';
     OcrModule,
     SharepointModule,
     NamingRulesModule,
+    MemberCheckModule,
+    KeiriOcrModule,
   ],
 })
 export class AppModule {}

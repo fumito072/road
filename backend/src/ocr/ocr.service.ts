@@ -31,6 +31,36 @@ export interface OcrResult {
   confidence: number;
 }
 
+export interface ExtractedPerson {
+  group: string;
+  lastName: string;
+  firstName: string;
+  fullName: string;
+  kana: string;
+  handicap: string;
+  note: string;
+}
+
+export interface PeopleListResult {
+  people: ExtractedPerson[];
+  confidence: number;
+  raw: Record<string, unknown>;
+}
+
+export interface AccountingFileResult {
+  originalFileName: string;
+  company: string;
+  amount: string;
+  date: string;
+  documentType: string;
+}
+
+export interface AccountingExtractResult {
+  fileResults: AccountingFileResult[];
+  confidence: number;
+  raw: Record<string, unknown>;
+}
+
 type GeminiGenerateResult = {
   model: string;
   raw: Record<string, unknown>;
@@ -118,6 +148,237 @@ export class OcrService {
       structured: normalized,
       confidence: Number(normalized.confidence ?? 0),
     };
+  }
+
+  /**
+   * 紙の名簿画像（ゴルフコンペ参加者表など）から人物の一覧を抽出する。
+   * 文書命名フローとは別物で、1枚の画像から複数人を取り出すのが目的。
+   */
+  async extractPeopleList(file: {
+    storagePath?: string;
+    buffer?: Buffer;
+    mimeType: string;
+    originalFileName: string;
+  }): Promise<PeopleListResult> {
+    const apiKey = this.config.get<string>('GEMINI_API_KEY');
+    const model = this.config.get<string>('GEMINI_MODEL') ?? 'gemini-2.5-flash';
+    const fallbackModels = this.parseModelList(
+      this.config.get<string>('GEMINI_FALLBACK_MODELS') ?? 'gemini-2.5-flash-lite',
+    );
+
+    if (!apiKey) {
+      throw new BadRequestException('GEMINI_API_KEY is not configured');
+    }
+
+    if (!file.buffer && !file.storagePath) {
+      throw new BadRequestException('No image provided for people-list extraction');
+    }
+
+    const buffer = file.buffer ?? (await this.loadFileBuffer(file.storagePath as string));
+    const parts: Array<Record<string, unknown>> = [
+      { text: this.buildPeopleListPrompt() },
+      {
+        inline_data: {
+          mime_type: this.resolveMimeType(file.mimeType, file.originalFileName),
+          data: buffer.toString('base64'),
+        },
+      },
+    ];
+
+    const { raw } = await this.generateContentWithFallback(apiKey, [model, ...fallbackModels], parts);
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = this.parseStructuredJson(this.extractText(raw));
+    } catch (err) {
+      this.logger.error('Failed to parse Gemini people-list response', err as Error);
+      throw new InternalServerErrorException(
+        '名簿の読み取り結果を解析できませんでした。画像を確認して再実行してください。',
+      );
+    }
+
+    return {
+      people: this.normalizePeople(parsed),
+      confidence: this.asNumber(parsed.confidence) ?? 0.6,
+      raw,
+    };
+  }
+
+  private buildPeopleListPrompt(): string {
+    return [
+      'あなたは日本語の名簿・参加者リストを読み取るOCRシステムです。',
+      '画像は紙の名簿（例：ゴルフコンペの参加者表）で、複数の人物が表形式で並んでいます。1行に複数名が含まれることがあります。',
+      '各人物について以下を抽出してください：',
+      '- group: 組番号・グループ番号（例: 805）。無ければ空文字。',
+      '- lastName: 氏名の「姓」。',
+      '- firstName: 氏名の「名」。',
+      '- fullName: 「姓 名」（姓と名を半角スペース1つで連結）。',
+      '- kana: 氏名のフリガナ（カタカナ）。多くは氏名の上に小さく書かれています。無ければ空文字。',
+      '- handicap: HDCP（ハンディキャップ）の数値。無ければ空文字。',
+      '- note: 会社名・「ゲスト」・資格表記など、その人に付随するメモ。無ければ空文字。',
+      '重要: 氏名の漢字は推測で変えず、見えたとおり正確に書き写してください。姓と名の間の区切り（スペース）で姓・名を分けてください。',
+      '重要: lastName / firstName / fullName / kana には人名（漢字・かな）だけを入れてください。名簿上の装飾記号（○ ● ◎ ※(米印) ☆ △ □ など）や参加区分の番号（「※2」など）は氏名に絶対に含めないでください。それらの印は note に入れてください（任意）。',
+      '読み取れない文字があっても最も可能性の高い字を1つ選び、自信が低い場合は confidence を下げてください。',
+      'ヘッダー行（「組」「氏名」「HDCP」等）・注意書き・表彰ルールなどは人物として出力しないでください。',
+      '出力は有効なJSONのみ。スキーマ:',
+      '{"people":[{"group":"","lastName":"","firstName":"","fullName":"","kana":"","handicap":"","note":""}],"confidence":0.0}',
+    ].join('\n');
+  }
+
+  private normalizePeople(parsed: Record<string, unknown>): ExtractedPerson[] {
+    const rawList = Array.isArray(parsed.people) ? parsed.people : [];
+    const people: ExtractedPerson[] = [];
+
+    for (const item of rawList) {
+      if (!item || typeof item !== 'object') continue;
+      const record = item as Record<string, unknown>;
+      let lastName = this.sanitizePersonName(this.asString(record.lastName) ?? '');
+      let firstName = this.sanitizePersonName(this.asString(record.firstName) ?? '');
+      let fullName = this.sanitizePersonName(this.asString(record.fullName) ?? '');
+
+      // 姓・名が空で fullName だけある場合は空白で分割する。
+      if (!lastName && !firstName && fullName) {
+        const parts = fullName.split(/[\s　]+/).filter(Boolean);
+        lastName = parts[0] ?? '';
+        firstName = parts.slice(1).join('');
+      }
+
+      // クリーニング後の姓・名から fullName を組み直し、記号の混入を防ぐ。
+      const rebuilt = [lastName, firstName].filter(Boolean).join(' ');
+      if (rebuilt) fullName = rebuilt;
+
+      if (!lastName && !firstName && !fullName) continue;
+
+      people.push({
+        group: this.asString(record.group) ?? '',
+        lastName,
+        firstName,
+        fullName,
+        kana: this.sanitizePersonName(this.asString(record.kana) ?? ''),
+        handicap: this.asString(record.handicap) ?? '',
+        note: this.asString(record.note) ?? '',
+      });
+    }
+
+    return people;
+  }
+
+  /**
+   * 氏名から装飾記号(○ ● ◎ ※(米印) ☆ △ □ など)・番号・括弧を除去し、人名だけを残す。
+   * 注意: 「米内山」等の漢字「米」(U+7C73) は除去対象ではない。除去するのは米印「※」(U+203B) など。
+   */
+  private sanitizePersonName(value: string): string {
+    if (!value) return '';
+    return value
+      .replace(/[○◯〇◎●⭕⚪⚫＊*※☆★◇◆□■△▲▽▼▶▷◀◁→←↑↓…]/g, ' ')
+      .replace(/[0-9０-９]/g, ' ')
+      .replace(/[()（）\[\]{}【】「」『』〔〕＜＞<>]/g, ' ')
+      .replace(/[\s　]+/g, ' ')
+      .trim();
+  }
+
+  /**
+   * 経理用: 領収書・請求書を読み取り、会社名・金額・取引日・書類種別を抽出する。
+   * ファイル名は「購入日_会社名_金額」を想定（最終的な命名は呼び出し側で組み立てる）。
+   */
+  async extractAccountingDocuments(
+    files: Array<{
+      storagePath?: string;
+      buffer?: Buffer;
+      mimeType: string;
+      originalFileName: string;
+    }>,
+  ): Promise<AccountingExtractResult> {
+    const apiKey = this.config.get<string>('GEMINI_API_KEY');
+    const model = this.config.get<string>('GEMINI_MODEL') ?? 'gemini-2.5-flash';
+    const fallbackModels = this.parseModelList(
+      this.config.get<string>('GEMINI_FALLBACK_MODELS') ?? 'gemini-2.5-flash-lite',
+    );
+
+    if (!apiKey) {
+      throw new BadRequestException('GEMINI_API_KEY is not configured');
+    }
+
+    const parts: Array<Record<string, unknown>> = [{ text: this.buildAccountingPrompt(files) }];
+    for (const file of files) {
+      if (!file.buffer && !file.storagePath) {
+        throw new BadRequestException('No image provided for accounting extraction');
+      }
+      const buffer = file.buffer ?? (await this.loadFileBuffer(file.storagePath as string));
+      parts.push({ text: `File name: ${file.originalFileName}` });
+      parts.push({
+        inline_data: {
+          mime_type: this.resolveMimeType(file.mimeType, file.originalFileName),
+          data: buffer.toString('base64'),
+        },
+      });
+    }
+
+    const { raw } = await this.generateContentWithFallback(apiKey, [model, ...fallbackModels], parts);
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = this.parseStructuredJson(this.extractText(raw));
+    } catch (err) {
+      this.logger.error('Failed to parse Gemini accounting response', err as Error);
+      throw new InternalServerErrorException(
+        '領収書・請求書の読み取り結果を解析できませんでした。ファイルを確認して再実行してください。',
+      );
+    }
+
+    const rawList = Array.isArray(parsed.fileResults) ? parsed.fileResults : [];
+    const fileResults: AccountingFileResult[] = files.map((file, index) => {
+      const candidate = (rawList[index] ?? {}) as Record<string, unknown>;
+      return {
+        originalFileName: file.originalFileName,
+        company: this.sanitizeCompanyName(this.asString(candidate.company) ?? ''),
+        amount: this.normalizeAmount(candidate.amount),
+        date: this.normalizeDocumentDate(candidate.date),
+        documentType: this.asString(candidate.documentType) ?? '',
+      };
+    });
+
+    return {
+      fileResults,
+      confidence: this.asNumber(parsed.confidence) ?? 0.6,
+      raw,
+    };
+  }
+
+  private buildAccountingPrompt(
+    files: Array<{ originalFileName: string }>,
+  ): string {
+    const fileNames = files.map((file, index) => `${index + 1}. ${file.originalFileName}`).join('\n');
+    return [
+      'あなたは経費精算のために領収書・請求書を読み取るOCRシステムです。',
+      'アップロードされた各ファイル（1ファイル＝1書類）について、以下を抽出してください。',
+      '- company: 発行元の会社名・店舗名（領収書なら発行した店舗/会社、請求書なら請求元）。「株式会社」などの会社種別は付いていればそのまま含める。',
+      '- amount: 税込の合計金額。数字のみ（カンマ・¥・円・小数は付けない）。例: 「¥3,300」→「3300」。複数あれば合計（お支払い金額）を採用。',
+      '- date: 取引日（領収書は領収日/購入日、請求書は発行日）を YYYYMMDD で。令和/平成/昭和は西暦に変換。読み取れなければ空文字。',
+      '- documentType: 「領収書」または「請求書」。判別できなければ「その他」。',
+      'fileResults は入力ファイルと同じ件数・同じ順番で返してください。',
+      '出力は有効なJSONのみ。スキーマ:',
+      '{"fileResults":[{"originalFileName":"","company":"","amount":"","date":"","documentType":""}],"confidence":0.0}',
+      'Files:',
+      fileNames,
+    ].join('\n');
+  }
+
+  private normalizeAmount(value: unknown): string {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(Math.round(value));
+    }
+    if (typeof value !== 'string') return '';
+    return value.replace(/[^0-9]/g, '');
+  }
+
+  // 会社名から命名に使えない文字を除去（半角スペース化）。社名内のスペースは保持。
+  private sanitizeCompanyName(value: string): string {
+    return value
+      .trim()
+      .replace(/[\\/:*?"<>|]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   private buildMockResult(files: ExtractFileInput[]): OcrResult {

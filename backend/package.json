@@ -12,7 +12,8 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
-    "create-user": "ts-node src/scripts/create-user.ts"
+    "create-user": "ts-node src/scripts/create-user.ts",
+    "salesforce-test": "ts-node src/scripts/salesforce-test.ts"
   },
   "dependencies": {
     "@nestjs/cli": "^10.4.2",

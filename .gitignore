@@ -20,6 +20,10 @@ backend/dist/
 
 # Customer/sample data — must never be committed (contains real PII)
 /test/
+# Client-provided rosters / member lists (LINE exports etc.) — real personal data
+/S__*.jpg
+/S__*.jpeg
+/roster-samples/
 
 # Internal company notes / working docs — not for client handoff
 /.company/
