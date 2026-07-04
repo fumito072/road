@@ -1,5 +1,7 @@
 import {
   Controller,
+  Get,
+  Param,
   Post,
   UploadedFile,
   UseGuards,
@@ -21,7 +23,8 @@ type UploadedImage = {
 export class MemberCheckController {
   constructor(private readonly memberCheckService: MemberCheckService) {}
 
-  // 名簿画像を1枚受け取り、OCR抽出 → Salesforce照合した結果を返す。
+  // 名簿画像を1枚受け取り、非同期ジョブを開始してジョブIDを即返す。
+  // （OCR+Salesforce照合は数十秒かかるため、同期で待たせずポーリング方式にする）
   @Post('scan')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -29,6 +32,12 @@ export class MemberCheckController {
     }),
   )
   scan(@UploadedFile() file: UploadedImage) {
-    return this.memberCheckService.scanRoster(file);
+    return this.memberCheckService.startScan(file);
+  }
+
+  // ジョブの状態・結果を取得（フロントが数秒ごとにポーリング）。
+  @Get('jobs/:id')
+  getJob(@Param('id') id: string) {
+    return this.memberCheckService.getJob(id);
   }
 }

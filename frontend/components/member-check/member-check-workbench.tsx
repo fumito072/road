@@ -53,6 +53,26 @@ type MemberCheckResult = {
   people: MemberCheckPersonResult[];
 };
 
+type ScanJobAck = {
+  jobId: string;
+  status: "processing" | "completed" | "error";
+};
+
+type MemberCheckJobView = {
+  id: string;
+  status: "processing" | "completed" | "error";
+  result: MemberCheckResult | null;
+  error: string | null;
+};
+
+// ポーリング設定: 2.5秒間隔 × 最大120回 ≒ 5分まで待つ。
+const POLL_INTERVAL_MS = 2500;
+const POLL_MAX_ATTEMPTS = 120;
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 type PersonStatus = "matched" | "multiple" | "none";
 
 function personStatus(person: MemberCheckPersonResult): PersonStatus {
@@ -121,13 +141,34 @@ export function MemberCheckWorkbench() {
     setError(null);
     setResult(null);
     try {
+      // 1) スキャンを受付（即ジョブIDが返る）。長い処理でもここでは待たないのでタイムアウトしない。
       const form = new FormData();
       form.append("file", file);
-      const data = await apiFetch<MemberCheckResult>("/member-check/scan", {
+      const ack = await apiFetch<ScanJobAck>("/member-check/scan", {
         method: "POST",
         body: form,
       });
-      setResult(data);
+
+      // 2) 完了するまで数秒ごとに結果を確認（各リクエストは短いので切られない）。
+      let finalResult: MemberCheckResult | null = null;
+      for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt += 1) {
+        await wait(POLL_INTERVAL_MS);
+        const job = await apiFetch<MemberCheckJobView>(`/member-check/jobs/${ack.jobId}`);
+        if (job.status === "completed" && job.result) {
+          finalResult = job.result;
+          break;
+        }
+        if (job.status === "error") {
+          throw new Error(job.error || "照合処理でエラーが発生しました。");
+        }
+      }
+
+      if (!finalResult) {
+        throw new Error(
+          "照合に時間がかかっています。名簿を分割して人数を減らすか、少し時間を置いて再実行してください。",
+        );
+      }
+      setResult(finalResult);
     } catch (err) {
       setError(
         err instanceof Error

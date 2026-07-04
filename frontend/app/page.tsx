@@ -19,7 +19,7 @@ export default function HomePage() {
         <div className="mx-auto flex w-full max-w-7xl items-center gap-2 px-4 py-2 lg:px-6">
           <span className="mr-3 text-sm font-extrabold tracking-tight text-[#1f2b37]">ROAD</span>
           <NavTab active={view === "naming"} onClick={() => setView("naming")}>
-            AI OCR ファイル命名
+            AI OCR
           </NavTab>
           <NavTab active={view === "roster"} onClick={() => setView("roster")}>
             名簿照合 (Salesforce)
