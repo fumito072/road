@@ -68,9 +68,10 @@ export class MemberCheckService {
    * OCR + Salesforce 照合は数十秒かかることがあるため、同期で待たせると
    * 途中でプロキシにタイムアウトされる。ここでは受付だけしてバックグラウンドで処理する。
    */
-  startScan(file?: UploadedImage): { jobId: string; status: MemberCheckJobStatus } {
-    if (!file || !file.buffer || file.buffer.length === 0) {
-      throw new BadRequestException('画像ファイルがアップロードされていません。');
+  startScan(files?: UploadedImage[]): { jobId: string; status: MemberCheckJobStatus } {
+    const valid = (files ?? []).filter((f) => f && f.buffer && f.buffer.length > 0);
+    if (valid.length === 0) {
+      throw new BadRequestException('ファイルがアップロードされていません。');
     }
 
     this.purgeExpiredJobs();
@@ -80,11 +81,14 @@ export class MemberCheckService {
     this.jobs.set(id, { id, status: 'processing', createdAt: now, updatedAt: now });
 
     // awaitしない（バックグラウンド実行）。バッファはクロージャで保持される。
-    void this.runJob(id, {
-      buffer: file.buffer,
-      mimeType: file.mimetype,
-      originalFileName: file.originalname,
-    });
+    void this.runJob(
+      id,
+      valid.map((f) => ({
+        buffer: f.buffer,
+        mimeType: f.mimetype,
+        originalFileName: f.originalname,
+      })),
+    );
 
     return { jobId: id, status: 'processing' };
   }
@@ -105,9 +109,9 @@ export class MemberCheckService {
     };
   }
 
-  private async runJob(id: string, input: ScanInput): Promise<void> {
+  private async runJob(id: string, inputs: ScanInput[]): Promise<void> {
     try {
-      const result = await this.scanRoster(input);
+      const result = await this.scanRoster(inputs);
       const job = this.jobs.get(id);
       if (job) {
         job.status = 'completed';
@@ -138,15 +142,22 @@ export class MemberCheckService {
     }
   }
 
-  /** 実処理: 名簿画像のOCR抽出 → 各人をSalesforceで照合。 */
-  async scanRoster(input: ScanInput): Promise<MemberCheckResult> {
-    const extraction = await this.ocrService.extractPeopleList({
-      buffer: input.buffer,
-      mimeType: input.mimeType,
-      originalFileName: input.originalFileName,
-    });
+  /** 実処理: 名簿ファイル（複数可）のOCR抽出 → 各人をSalesforceで照合。 */
+  async scanRoster(inputs: ScanInput[]): Promise<MemberCheckResult> {
+    // 複数ファイル（フォルダ含む）は全ファイルから人物を抽出し、まとめて照合する。
+    const allPeople: ExtractedPerson[] = [];
+    const confidences: number[] = [];
+    for (const input of inputs) {
+      const extraction = await this.ocrService.extractPeopleList({
+        buffer: input.buffer,
+        mimeType: input.mimeType,
+        originalFileName: input.originalFileName,
+      });
+      allPeople.push(...extraction.people);
+      confidences.push(extraction.confidence);
+    }
 
-    const people = await this.matchPeopleWithSalesforce(extraction.people);
+    const people = await this.matchPeopleWithSalesforce(allPeople);
 
     const matchedCount = people.filter((p) => p.salesforce.exists).length;
     const salesforceConfigured = people[0]?.salesforce.configured ?? this.salesforceService.isConfigured();
@@ -154,7 +165,7 @@ export class MemberCheckService {
     return {
       totalPeople: people.length,
       matchedCount,
-      confidence: extraction.confidence,
+      confidence: confidences.length ? Math.min(...confidences) : 0,
       salesforceConfigured,
       people,
     };

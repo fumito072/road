@@ -49,6 +49,21 @@ export class UsersService {
     });
   }
 
+  // 管理者が対象ユーザーのパスワードを再設定する（新しい仮パスワードを本人に伝える運用）。
+  // ※パスワードはハッシュ保存で「確認(閲覧)」は原理的に不可のため、再設定で対応する。
+  async resetPassword(id: string, password: string) {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) {
+      throw new NotFoundException('ユーザーが見つかりません');
+    }
+    const passwordHash = await bcrypt.hash(password, 10);
+    await this.prisma.user.update({
+      where: { id },
+      data: { passwordHash },
+    });
+    return { success: true };
+  }
+
   async remove(id: string, requesterId: string) {
     const user = await this.prisma.user.findUnique({ where: { id } });
     if (!user) {

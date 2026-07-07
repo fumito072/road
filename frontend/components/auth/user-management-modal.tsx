@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { X, Plus, Trash2, ShieldCheck, User as UserIcon } from "lucide-react";
+import { X, Plus, Trash2, ShieldCheck, User as UserIcon, KeyRound } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import type { User } from "@/lib/types";
 import { useAuth } from "./auth-provider";
@@ -15,6 +15,12 @@ export function UserManagementModal({ onClose }: UserManagementModalProps) {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+
+  // パスワード再設定（管理者操作）
+  const [resetTargetId, setResetTargetId] = useState<string | null>(null);
+  const [newPassword, setNewPassword] = useState("");
+  const [resetLoading, setResetLoading] = useState(false);
 
   // 新規追加フォーム
   const [email, setEmail] = useState("");
@@ -83,6 +89,31 @@ export function UserManagementModal({ onClose }: UserManagementModalProps) {
     }
   };
 
+  const handleResetPassword = async (target: User) => {
+    if (newPassword.length < 8) {
+      setError("パスワードは8文字以上で入力してください。");
+      return;
+    }
+    setError(null);
+    setInfo(null);
+    setResetLoading(true);
+    try {
+      await apiFetch(`/users/${target.id}/password`, {
+        method: "POST",
+        body: JSON.stringify({ password: newPassword }),
+      });
+      setInfo(
+        `「${target.displayName || target.email}」のパスワードを再設定しました。本人に次のパスワードをお伝えください：${newPassword}`,
+      );
+      setResetTargetId(null);
+      setNewPassword("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "パスワードの再設定に失敗しました。");
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
   const canSubmit = email.trim() && password.length >= 8;
 
   return (
@@ -104,6 +135,11 @@ export function UserManagementModal({ onClose }: UserManagementModalProps) {
           {error && (
             <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
               {error}
+            </div>
+          )}
+          {info && (
+            <div className="mb-4 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-sm text-cyan-200">
+              {info}
             </div>
           )}
 
@@ -188,35 +224,89 @@ export function UserManagementModal({ onClose }: UserManagementModalProps) {
               {users.map((u) => (
                 <div
                   key={u.id}
-                  className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-4 py-3"
+                  className="rounded-lg border border-white/10 bg-white/5"
                 >
-                  <div className="flex items-center gap-3">
-                    {u.role === "ADMIN" ? (
-                      <ShieldCheck className="h-4 w-4 text-cyan-400" />
-                    ) : (
-                      <UserIcon className="h-4 w-4 text-slate-400" />
-                    )}
-                    <div>
-                      <p className="text-sm text-slate-100">
-                        {u.displayName || u.email}
-                        {u.id === currentUser?.id && (
-                          <span className="ml-2 text-xs text-slate-500">(あなた)</span>
-                        )}
-                      </p>
-                      <p className="text-xs text-slate-500">
-                        {u.email} ・ {u.role === "ADMIN" ? "管理者" : "一般ユーザー"}
-                      </p>
+                  <div className="flex items-center justify-between px-4 py-3">
+                    <div className="flex items-center gap-3">
+                      {u.role === "ADMIN" ? (
+                        <ShieldCheck className="h-4 w-4 text-cyan-400" />
+                      ) : (
+                        <UserIcon className="h-4 w-4 text-slate-400" />
+                      )}
+                      <div>
+                        <p className="text-sm text-slate-100">
+                          {u.displayName || u.email}
+                          {u.id === currentUser?.id && (
+                            <span className="ml-2 text-xs text-slate-500">(あなた)</span>
+                          )}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          {u.email} ・ {u.role === "ADMIN" ? "管理者" : "一般ユーザー"}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setResetTargetId(resetTargetId === u.id ? null : u.id);
+                          setNewPassword("");
+                          setError(null);
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-cyan-500/10 hover:text-cyan-300"
+                        title="パスワード再設定"
+                      >
+                        <KeyRound className="h-4 w-4" />
+                      </button>
+                      {u.id !== currentUser?.id && (
+                        <button
+                          type="button"
+                          onClick={() => handleDelete(u)}
+                          className="inline-flex items-center gap-1 rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-red-500/10 hover:text-red-400"
+                          title="削除"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      )}
                     </div>
                   </div>
-                  {u.id !== currentUser?.id && (
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(u)}
-                      className="inline-flex items-center gap-1 rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-red-500/10 hover:text-red-400"
-                      title="削除"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
+
+                  {resetTargetId === u.id && (
+                    <div className="border-t border-white/10 px-4 py-3">
+                      <label className="mb-1 block text-xs font-medium text-slate-400">
+                        新しいパスワード（8文字以上）
+                      </label>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          type="text"
+                          value={newPassword}
+                          onChange={(e) => setNewPassword(e.target.value)}
+                          className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-500/50"
+                          placeholder="本人に伝える新しいパスワード"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleResetPassword(u)}
+                          disabled={newPassword.length < 8 || resetLoading}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-cyan-500 disabled:opacity-50"
+                        >
+                          {resetLoading ? "設定中..." : "再設定する"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setResetTargetId(null);
+                            setNewPassword("");
+                          }}
+                          className="rounded-lg px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-200"
+                        >
+                          キャンセル
+                        </button>
+                      </div>
+                      <p className="mt-2 text-xs text-slate-500">
+                        再設定後、このパスワードを本人にお伝えください。（既存のパスワードは確認できません）
+                      </p>
+                    </div>
                   )}
                 </div>
               ))}

@@ -1,18 +1,19 @@
 "use client";
 
-import type { ChangeEvent, DragEvent } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   CheckCircle2,
   CircleAlert,
   ExternalLink,
   RefreshCw,
   Search,
-  Upload,
+  Trash2,
   Users,
 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api";
+import { UploadDropzone } from "@/components/common/upload-dropzone";
+import { formatBytes, type DroppedFile } from "@/lib/file-drop";
 
 type MemberCheckMatch = {
   source: "contact" | "torihikisaki_tantou";
@@ -65,6 +66,12 @@ type MemberCheckJobView = {
   error: string | null;
 };
 
+type QueueItem = {
+  id: string;
+  file: File;
+  relativePath: string;
+};
+
 // ポーリング設定: 2.5秒間隔 × 最大120回 ≒ 5分まで待つ。
 const POLL_INTERVAL_MS = 2500;
 const POLL_MAX_ATTEMPTS = 120;
@@ -86,64 +93,41 @@ const statusBadge: Record<PersonStatus, { label: string; className: string }> = 
   none: { label: "未登録", className: "border-[#d8e1ea] bg-[#f4f7fa] text-[#6b7a8a]" },
 };
 
-function isImageOrPdf(file: File) {
-  return file.type.startsWith("image/") || file.type === "application/pdf";
-}
-
 export function MemberCheckWorkbench() {
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const [file, setFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<MemberCheckResult | null>(null);
 
-  useEffect(() => {
-    if (!file || !file.type.startsWith("image/")) {
-      setPreviewUrl(null);
-      return;
-    }
-    const url = URL.createObjectURL(file);
-    setPreviewUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [file]);
-
-  const acceptFile = useCallback((next: File | null) => {
-    setError(null);
+  const addFiles = useCallback((incoming: DroppedFile[]) => {
     setResult(null);
-    if (!next) {
-      setFile(null);
-      return;
-    }
-    if (!isImageOrPdf(next)) {
-      setError("画像（JPG/PNG）または PDF を選んでください。");
-      return;
-    }
-    setFile(next);
+    setQueue((current) => [
+      ...current,
+      ...incoming.map((item, index) => ({
+        id: `${item.file.name}-${item.file.lastModified}-${current.length + index}`,
+        file: item.file,
+        relativePath: item.relativePath,
+      })),
+    ]);
   }, []);
 
-  const handleInputChange = (event: ChangeEvent<HTMLInputElement>) => {
-    acceptFile(event.target.files?.[0] ?? null);
-    event.target.value = "";
-  };
+  const removeQueued = (id: string) => setQueue((c) => c.filter((x) => x.id !== id));
 
-  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    setIsDragging(false);
-    acceptFile(event.dataTransfer.files?.[0] ?? null);
+  const handleReset = () => {
+    setQueue([]);
+    setResult(null);
+    setError(null);
   };
 
   const handleScan = useCallback(async () => {
-    if (!file) return;
+    if (queue.length === 0) return;
     setIsScanning(true);
     setError(null);
     setResult(null);
     try {
       // 1) スキャンを受付（即ジョブIDが返る）。長い処理でもここでは待たないのでタイムアウトしない。
       const form = new FormData();
-      form.append("file", file);
+      queue.forEach((item) => form.append("files", item.file));
       const ack = await apiFetch<ScanJobAck>("/member-check/scan", {
         method: "POST",
         body: form,
@@ -165,7 +149,7 @@ export function MemberCheckWorkbench() {
 
       if (!finalResult) {
         throw new Error(
-          "照合に時間がかかっています。名簿を分割して人数を減らすか、少し時間を置いて再実行してください。",
+          "照合に時間がかかっています。ファイルを分割して人数を減らすか、少し時間を置いて再実行してください。",
         );
       }
       setResult(finalResult);
@@ -178,13 +162,7 @@ export function MemberCheckWorkbench() {
     } finally {
       setIsScanning(false);
     }
-  }, [file]);
-
-  const handleReset = () => {
-    setFile(null);
-    setResult(null);
-    setError(null);
-  };
+  }, [queue]);
 
   return (
     <div className="min-h-screen bg-[#f5f7fb] text-[#222b38]">
@@ -219,80 +197,55 @@ export function MemberCheckWorkbench() {
             <div className="border-b border-[#ecf0f4] px-6 py-5">
               <h2 className="text-2xl font-bold text-[#1f2b37]">① 名簿をアップロード</h2>
               <p className="mt-2 text-sm text-[#6a7684]">
-                参加者名簿などの画像（JPG/PNG）またはPDFを1枚選んでください。
+                参加者名簿などのフォルダ／ファイル（PDF・画像）を選ぶか、ここへドラッグ&ドロップしてください。
               </p>
             </div>
 
             <div className="p-6">
-              <div
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setIsDragging(true);
-                }}
-                onDragLeave={() => setIsDragging(false)}
-                onDrop={handleDrop}
-                className={`flex min-h-[220px] w-full flex-col items-center justify-center rounded-sm border-2 border-dashed px-6 py-8 text-center transition ${
-                  isDragging
-                    ? "border-[#40d4db] bg-[#e3fbff]"
-                    : "border-[#7ddde0] bg-[linear-gradient(180deg,#fafdff_0%,#eefbff_100%)]"
-                }`}
-              >
-                {previewUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={previewUrl}
-                    alt="名簿プレビュー"
-                    className="max-h-[260px] max-w-full rounded-sm border border-[#dce6ee] object-contain shadow-sm"
-                  />
-                ) : (
-                  <>
-                    <span className="inline-flex h-16 w-16 items-center justify-center rounded-full bg-[#69dce2]/20 text-[#44cfd8]">
-                      <Upload className="h-8 w-8" />
-                    </span>
-                    <p className="mt-4 text-lg font-bold text-[#1f2b37]">
-                      {isDragging ? "ここにドロップ" : "ドラッグ&ドロップ"}
-                    </p>
-                    <p className="mt-1 text-sm text-[#6c7782]">またはボタンから選択</p>
-                  </>
-                )}
+              <UploadDropzone
+                onFiles={addFiles}
+                onNotice={setError}
+                minHeight="min-h-[220px]"
+              />
 
-                <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="rounded-full bg-[#40d4db] px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#35c7ce]"
-                  >
-                    {file ? "別の画像を選択" : "画像を選択"}
-                  </button>
-                  {file && (
+              {queue.length > 0 && (
+                <div className="mt-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold text-[#3a4756]">追加済み {queue.length} 件</p>
                     <button
                       type="button"
                       onClick={handleReset}
-                      className="rounded-full border border-[#d5dee8] bg-white px-5 py-2 text-sm font-semibold text-[#5e6c7b] transition hover:border-[#44cfd8]"
+                      className="text-xs font-semibold text-[#8b98a6] hover:text-[#b43a6a]"
                     >
-                      クリア
+                      すべてクリア
                     </button>
-                  )}
+                  </div>
+                  <ul className="max-h-44 space-y-1 overflow-auto rounded-sm border border-[#e7edf3] bg-[#fbfcfe] p-2">
+                    {queue.map((item) => (
+                      <li key={item.id} className="flex items-center justify-between gap-2 px-2 py-1 text-sm">
+                        <span className="min-w-0 truncate text-[#34404d]" title={item.relativePath}>
+                          {item.file.name}
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2">
+                          <span className="text-xs text-[#8b98a6]">{formatBytes(item.file.size)}</span>
+                          <button
+                            type="button"
+                            onClick={() => removeQueued(item.id)}
+                            className="text-[#b9c2cc] hover:text-[#b43a6a]"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
-                {file && (
-                  <p className="mt-3 truncate text-xs text-[#8b98a6]" title={file.name}>
-                    {file.name}
-                  </p>
-                )}
-              </div>
-
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*,application/pdf"
-                className="hidden"
-                onChange={handleInputChange}
-              />
+              )}
 
               <button
                 type="button"
                 onClick={handleScan}
-                disabled={!file || isScanning}
+                disabled={queue.length === 0 || isScanning}
                 className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-sm bg-[#ea4f82] px-6 py-4 text-base font-bold text-white transition hover:bg-[#da3d72] disabled:cursor-not-allowed disabled:bg-[#f0b6ca]"
               >
                 {isScanning ? (

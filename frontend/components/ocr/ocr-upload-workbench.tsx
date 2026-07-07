@@ -24,6 +24,7 @@ import {
 
 import { acceptedFormats } from "@/data/ocr";
 import { apiFetch, apiFetchBlob } from "@/lib/api";
+import { FloatingPreview } from "@/components/common/floating-preview";
 import type {
   SharepointFolderBrowserResult,
   SharepointFolderOption,
@@ -1004,9 +1005,8 @@ export function OcrUploadWorkbench() {
       </div>
 
       {previewFile && (
-        <FilePreviewModal
-          uploadId={previewFile.uploadId}
-          fileId={previewFile.fileId}
+        <FloatingPreview
+          previewPath={`/uploads/${previewFile.uploadId}/files/${previewFile.fileId}/preview`}
           name={previewFile.name}
           mimeType={previewFile.mimeType}
           onClose={() => setPreviewFile(null)}
@@ -1016,105 +1016,4 @@ export function OcrUploadWorkbench() {
   );
 }
 
-function FilePreviewModal({
-  uploadId,
-  fileId,
-  name,
-  mimeType,
-  onClose,
-}: {
-  uploadId: string;
-  fileId: string;
-  name: string;
-  mimeType: string;
-  onClose: () => void;
-}) {
-  const isImage = mimeType.startsWith("image/");
-  const [blobUrl, setBlobUrl] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    let createdUrl: string | null = null;
-
-    (async () => {
-      try {
-        const blob = await apiFetchBlob(`/uploads/${uploadId}/files/${fileId}/preview`);
-        if (cancelled) return;
-        createdUrl = URL.createObjectURL(blob);
-        setBlobUrl(createdUrl);
-      } catch (err) {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : "プレビューの取得に失敗しました");
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      if (createdUrl) URL.revokeObjectURL(createdUrl);
-    };
-  }, [uploadId, fileId]);
-
-  const handleDownload = async () => {
-    try {
-      const blob = await apiFetchBlob(`/uploads/${uploadId}/files/${fileId}/preview`);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "ダウンロードに失敗しました");
-    }
-  };
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="flex h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-sm bg-white shadow-2xl"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-[#e5ebf1] bg-[#f6f8fb] px-5 py-3">
-          <p className="truncate text-sm font-semibold text-[#1f2b37]">{name}</p>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={handleDownload}
-              className="text-xs font-medium text-[#127780] hover:underline"
-            >
-              ダウンロード
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-sm border border-[#d5dee8] bg-white px-3 py-1 text-xs font-medium text-[#445063] hover:border-[#44cfd8]"
-            >
-              閉じる
-            </button>
-          </div>
-        </div>
-        <div className="flex-1 overflow-auto bg-[#eef2f7]">
-          {error ? (
-            <div className="flex h-full items-center justify-center px-6 text-center text-sm text-[#b43a6a]">
-              {error}
-            </div>
-          ) : !blobUrl ? (
-            <div className="flex h-full items-center justify-center text-sm text-[#4c6478]">
-              読み込み中...
-            </div>
-          ) : isImage ? (
-            <img src={blobUrl} alt={name} className="mx-auto max-h-full max-w-full object-contain" />
-          ) : (
-            <iframe src={blobUrl} title={name} className="h-full w-full" />
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
+// プレビューは共通コンポーネント FloatingPreview（非モーダル・移動可能）に置き換えました。

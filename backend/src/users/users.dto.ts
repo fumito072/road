@@ -16,3 +16,9 @@ export class CreateUserDto {
   @IsOptional()
   role?: 'USER' | 'ADMIN';
 }
+
+export class ResetPasswordDto {
+  @IsString()
+  @MinLength(8, { message: 'パスワードは8文字以上で設定してください' })
+  password!: string;
+}
