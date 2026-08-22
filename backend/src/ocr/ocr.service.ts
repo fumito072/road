@@ -331,7 +331,10 @@ export class OcrService {
       const candidate = (rawList[index] ?? {}) as Record<string, unknown>;
       return {
         originalFileName: file.originalFileName,
-        company: this.sanitizeCompanyName(this.asString(candidate.company) ?? ''),
+        // プロンプトでも法人格を外すよう指示しているが、モデルが付けてくることがあるため確実に除去する。
+        company: this.stripCompanyDesignators(
+          this.sanitizeCompanyName(this.asString(candidate.company) ?? ''),
+        ),
         amount: this.normalizeAmount(candidate.amount),
         date: this.normalizeDocumentDate(candidate.date),
         documentType: this.asString(candidate.documentType) ?? '',
@@ -352,7 +355,8 @@ export class OcrService {
     return [
       'あなたは経費精算のために領収書・請求書を読み取るOCRシステムです。',
       'アップロードされた各ファイル（1ファイル＝1書類）について、以下を抽出してください。',
-      '- company: 発行元の会社名・店舗名（領収書なら発行した店舗/会社、請求書なら請求元）。「株式会社」などの会社種別は付いていればそのまま含める。',
+      '- company: 発行元の会社名・店舗名（領収書なら発行した店舗/会社、請求書なら請求元）。',
+      '  重要: 「株式会社」「有限会社」「合同会社」「（株）」「㈱」「Inc.」「Co., Ltd.」などの法人格は含めないでください。法人格を除いた社名だけを返します。例: 「株式会社ロード商事」→「ロード商事」。',
       '- amount: 税込の合計金額。数字のみ（カンマ・¥・円・小数は付けない）。例: 「¥3,300」→「3300」。複数あれば合計（お支払い金額）を採用。',
       '- date: 取引日（領収書は領収日/購入日、請求書は発行日）を YYYYMMDD で。令和/平成/昭和は西暦に変換。読み取れなければ空文字。',
       '- documentType: 「領収書」または「請求書」。判別できなければ「その他」。',

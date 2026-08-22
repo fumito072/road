@@ -21,15 +21,17 @@ async function bootstrap() {
       'FRONTEND_URL environment variable must be set when NODE_ENV=production',
     );
   }
-  const allowedOrigins = new Set(
-    [
-      frontendUrl,
-      ...(isProduction ? [] : ['http://localhost:3000']),
-    ].filter(Boolean),
-  );
+  const allowedOrigins = new Set([frontendUrl].filter(Boolean));
+
+  // 開発時のみ localhost / 127.0.0.1 を任意ポートで許可する。
+  // dev サーバーのポートは空き状況で変わる（3000 が別アプリに使われている等）ため、
+  // ポートを固定すると Next のプロキシが転送する Origin が弾かれて 500 になる。
+  const isLocalDevOrigin = (origin: string) =>
+    !isProduction && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+
   app.enableCors({
     origin: (origin, callback) => {
-      if (!origin || allowAnyOrigin || allowedOrigins.has(origin)) {
+      if (!origin || allowAnyOrigin || allowedOrigins.has(origin) || isLocalDevOrigin(origin)) {
         callback(null, true);
       } else {
         callback(new Error(`Origin ${origin} not allowed by CORS`));
@@ -41,7 +43,7 @@ async function bootstrap() {
 
   const port = Number(process.env.PORT ?? 3001);
   await app.listen(port, '0.0.0.0');
-  console.log(`ROAD Backend running on port ${port}`);
+  console.log(`LOAD Backend running on port ${port}`);
 }
 
 bootstrap().catch((err) => {

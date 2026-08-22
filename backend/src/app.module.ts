@@ -10,6 +10,7 @@ import { SharepointModule } from './sharepoint/sharepoint.module';
 import { NamingRulesModule } from './naming-rules/naming-rules.module';
 import { MemberCheckModule } from './member-check/member-check.module';
 import { KeiriOcrModule } from './keiri-ocr/keiri-ocr.module';
+import { NamingMemoryModule } from './naming-memory/naming-memory.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { KeiriOcrModule } from './keiri-ocr/keiri-ocr.module';
     NamingRulesModule,
     MemberCheckModule,
     KeiriOcrModule,
+    NamingMemoryModule,
   ],
 })
 export class AppModule {}

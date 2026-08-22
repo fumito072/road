@@ -16,6 +16,7 @@ import {
   Play,
   Save,
   Send,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 
@@ -48,6 +49,8 @@ type KeiriScanFile = {
   date: string;
   documentType: string;
   suggestedName: string;
+  ocrCompany: string;
+  appliedFromMemory: boolean;
 };
 
 type KeiriScanResult = {
@@ -66,6 +69,10 @@ type KeiriRow = {
   company: string;
   amount: string;
   documentType: string;
+  // AI が読んだ生の会社名。編集しても書き換えない（学習のキーになるため）。
+  ocrCompany: string;
+  // 過去の修正内容が自動適用された行かどうか。
+  appliedFromMemory: boolean;
 };
 
 type DestinationKind = "local" | "sharepoint";
@@ -181,6 +188,8 @@ export function KeiriOcrWorkbench() {
       queue.forEach((item) => intakeForm.append("files", item.file));
 
       const scanForm = new FormData();
+      // tabId は学習辞書（過去に直した取引先名）を引くために渡す。
+      scanForm.append("tabId", defaultTab.id);
       queue.forEach((item) => scanForm.append("files", item.file));
 
       const [createdUpload, scan] = await Promise.all([
@@ -203,13 +212,21 @@ export function KeiriOcrWorkbench() {
           company: s?.company ?? "",
           amount: s?.amount ?? "",
           documentType: s?.documentType ?? "",
+          ocrCompany: s?.ocrCompany ?? s?.company ?? "",
+          appliedFromMemory: s?.appliedFromMemory ?? false,
         };
       });
+
+      const appliedCount = nextRows.filter((row) => row.appliedFromMemory).length;
 
       setCurrentUpload(createdUpload);
       setRows(nextRows);
       setQueue([]);
-      setInfo("読み取りが完了しました。日付・会社名・金額を確認し、保存先を選んでください。");
+      setInfo(
+        appliedCount > 0
+          ? `読み取りが完了しました。${appliedCount} 件は前回までに修正いただいた会社名を自動で反映しています。`
+          : "読み取りが完了しました。日付・会社名・金額を確認し、保存先を選んでください。",
+      );
     } catch (err) {
       setError(
         err instanceof Error
@@ -222,8 +239,70 @@ export function KeiriOcrWorkbench() {
   };
 
   const updateRow = (id: string, patch: Partial<KeiriRow>) => {
-    setRows((current) => current.map((row) => (row.id === id ? { ...row, ...patch } : row)));
+    setRows((current) =>
+      current.map((row) => {
+        if (row.id !== id) return row;
+        // 会社名を手で直したら「自動反映」バッジは外す（以降はユーザー自身の値）。
+        // ocrCompany は学習のキーなので、ここでは絶対に上書きしない。
+        const clearBadge = patch.company !== undefined && patch.company !== row.company;
+        return { ...row, ...patch, ...(clearBadge ? { appliedFromMemory: false } : {}) };
+      }),
+    );
   };
+
+  /**
+   * 読み取り済みの書類を保存対象から外す。
+   * 重複した領収証などを、保存前に一覧から取り除くために使う。
+   * rows がローカル保存・SharePoint 保存の両方の対象なので、ここから消せば保存されない。
+   */
+  const removeRow = (id: string) => {
+    setRows((current) => {
+      const target = current.find((row) => row.id === id);
+      // 削除した行のプレビューが開いていたら閉じる。
+      if (target?.fileId && previewFile?.fileId === target.fileId) {
+        setPreviewFile(null);
+      }
+      return current.filter((row) => row.id !== id);
+    });
+    setInfo(null);
+  };
+
+  /**
+   * 学習の記録。保存が成功した瞬間だけ呼ぶ。
+   * 入力途中の値や打ち間違いを覚えないよう、onChange では記録しない。
+   * ocrValue には必ず「AI が読んだ生の値」を渡すこと（自動適用後の値ではない）。
+   */
+  const recordNamingMemory = useCallback(
+    async (savedRows: KeiriRow[]): Promise<number> => {
+      if (!defaultTab) return 0;
+
+      const entries = savedRows
+        // 自動反映されたまま手を加えていない行は、既に辞書にある内容なので送らない。
+        // （updateRow が会社名の編集時に appliedFromMemory を落とすため、true = 無修正）
+        .filter((row) => !row.appliedFromMemory)
+        .map((row) => ({ ocrValue: row.ocrCompany.trim(), confirmedValue: row.company.trim() }))
+        .filter((entry) => entry.ocrValue && entry.confirmedValue && entry.ocrValue !== entry.confirmedValue);
+
+      if (entries.length === 0) return 0;
+
+      try {
+        const result = await apiFetch<{ learned: number }>("/naming-memory/record", {
+          method: "POST",
+          body: JSON.stringify({ tabId: defaultTab.id, entries }),
+        });
+        return result.learned ?? 0;
+      } catch {
+        // 学習は補助機能。失敗してもファイルの保存自体は完了しているため、エラーは出さない。
+        return 0;
+      }
+    },
+    [defaultTab],
+  );
+
+  const learnedMessage = (learned: number) =>
+    learned > 0
+      ? `会社名の修正 ${learned} 件を記憶しました。次回から自動で反映されます。`
+      : "";
 
   // ④-A ローカルフォルダを選ぶ
   const handleChooseLocalDir = async () => {
@@ -260,7 +339,11 @@ export function KeiriOcrWorkbench() {
         await writable.close();
         saved += 1;
       }
-      setInfo(`ローカルフォルダ「${localDirName}」へ ${saved} 件を直接保存しました。`);
+      // 保存が全件通ってから学習する。
+      const learned = await recordNamingMemory(rows);
+      setInfo(
+        `ローカルフォルダ「${localDirName}」へ ${saved} 件を直接保存しました。${learnedMessage(learned)}`,
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "ローカル保存に失敗しました。フォルダの権限を確認してください。");
     } finally {
@@ -332,8 +415,10 @@ export function KeiriOcrWorkbench() {
         method: "POST",
       });
 
+      const learned = await recordNamingMemory(rows);
+
       setCurrentUpload(saved);
-      setInfo("SharePoint への保存が完了しました。");
+      setInfo(`SharePoint への保存が完了しました。${learnedMessage(learned)}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "SharePoint 保存に失敗しました。");
     } finally {
@@ -516,11 +601,23 @@ export function KeiriOcrWorkbench() {
                         >
                           元ファイル: {row.originalFileName}
                         </button>
-                        {row.documentType && (
-                          <span className="shrink-0 rounded-full border border-[#d8e6ef] bg-[#f6fbff] px-2 py-0.5 text-[11px] font-semibold text-[#4c6478]">
-                            {row.documentType}
-                          </span>
-                        )}
+                        <div className="flex shrink-0 items-center gap-2">
+                          {row.documentType && (
+                            <span className="rounded-full border border-[#d8e6ef] bg-[#f6fbff] px-2 py-0.5 text-[11px] font-semibold text-[#4c6478]">
+                              {row.documentType}
+                            </span>
+                          )}
+                          {/* 重複などで保存対象から外したい領収証を、保存前に一覧から取り除く。 */}
+                          <button
+                            type="button"
+                            onClick={() => removeRow(row.id)}
+                            title="この書類を保存対象から削除"
+                            className="inline-flex items-center gap-1 rounded-sm border border-[#f0cdd9] bg-white px-2 py-1 text-[11px] font-semibold text-[#b43a6a] transition hover:bg-[#fff3f8]"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            削除
+                          </button>
+                        </div>
                       </div>
 
                       <div className="mt-3 grid gap-2 sm:grid-cols-3">
@@ -539,8 +636,17 @@ export function KeiriOcrWorkbench() {
                           </div>
                         </label>
                         <label className="block">
-                          <span className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">
+                          <span className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">
                             会社名
+                            {row.appliedFromMemory && (
+                              <span
+                                className="inline-flex items-center gap-1 rounded-full border border-[#a7e3e8] bg-[#effcfd] px-2 py-0.5 text-[10px] font-bold normal-case tracking-normal text-[#0e7078]"
+                                title={`AI の読み取り「${row.ocrCompany}」を、前回までに確定した表記へ自動で置き換えました。`}
+                              >
+                                <Sparkles className="h-3 w-3" />
+                                前回の修正を自動反映
+                              </span>
+                            )}
                           </span>
                           <input
                             value={row.company}

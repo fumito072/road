@@ -5,9 +5,10 @@ import { OcrModule } from '../ocr/ocr.module';
 import { SharepointModule } from '../sharepoint/sharepoint.module';
 import { AuthModule } from '../auth/auth.module';
 import { NamingRulesModule } from '../naming-rules/naming-rules.module';
+import { NamingMemoryModule } from '../naming-memory/naming-memory.module';
 
 @Module({
-  imports: [AuthModule, OcrModule, SharepointModule, NamingRulesModule],
+  imports: [AuthModule, OcrModule, SharepointModule, NamingRulesModule, NamingMemoryModule],
   controllers: [UploadsController],
   providers: [UploadsService],
 })

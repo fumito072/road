@@ -88,6 +88,8 @@ export interface UploadStructuredResult {
   destinationFolderName?: string;
   fileCustomerName?: string;
   fileDate?: string;
+  /** 学習辞書からファイル名用の社名を自動反映したか。 */
+  customerNameAppliedFromMemory?: boolean;
   confidence?: number;
   summary?: string;
   destinationResolution?: DestinationResolution;

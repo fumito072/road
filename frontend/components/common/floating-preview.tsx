@@ -22,7 +22,8 @@ export function FloatingPreview({ previewPath, name, mimeType, onClose }: Floati
   const [error, setError] = useState<string | null>(null);
   const [pos, setPos] = useState<{ x: number; y: number }>(() => {
     if (typeof window === "undefined") return { x: 80, y: 96 };
-    return { x: Math.max(24, window.innerWidth - 560), y: 96 };
+    // 窓幅(780px)+余白ぶん左に寄せて初期表示する。重なってもドラッグで動かせる。
+    return { x: Math.max(24, window.innerWidth - 820), y: 96 };
   });
   const dragRef = useRef<{ dx: number; dy: number } | null>(null);
 
@@ -97,7 +98,7 @@ export function FloatingPreview({ previewPath, name, mimeType, onClose }: Floati
 
   return (
     <div
-      className="fixed z-50 flex max-h-[82vh] w-[min(92vw,520px)] flex-col overflow-hidden rounded-md border border-[#cfd8e2] bg-white shadow-2xl"
+      className="fixed z-50 flex max-h-[90vh] w-[min(95vw,780px)] flex-col overflow-hidden rounded-md border border-[#cfd8e2] bg-white shadow-2xl"
       style={{ left: pos.x, top: pos.y }}
     >
       <div
@@ -129,7 +130,7 @@ export function FloatingPreview({ previewPath, name, mimeType, onClose }: Floati
           </button>
         </span>
       </div>
-      <div className="min-h-[240px] flex-1 resize-y overflow-auto bg-[#eef2f7]">
+      <div className="min-h-[360px] flex-1 resize-y overflow-auto bg-[#eef2f7]">
         {error ? (
           <div className="flex h-full items-center justify-center px-6 py-10 text-center text-sm text-[#b43a6a]">
             {error}
@@ -142,7 +143,7 @@ export function FloatingPreview({ previewPath, name, mimeType, onClose }: Floati
           // eslint-disable-next-line @next/next/no-img-element
           <img src={blobUrl} alt={name} className="mx-auto max-h-full max-w-full object-contain" />
         ) : (
-          <iframe src={blobUrl} title={name} className="h-[60vh] w-full" />
+          <iframe src={blobUrl} title={name} className="h-[78vh] w-full" />
         )}
       </div>
     </div>

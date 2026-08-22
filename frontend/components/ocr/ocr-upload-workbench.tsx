@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Save,
   Send,
+  Sparkles,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -295,6 +296,10 @@ export function OcrUploadWorkbench() {
 
   const [previewFile, setPreviewFile] = useState<{ uploadId: string; fileId: string; name: string; mimeType: string } | null>(null);
 
+  // 学習用。ocrCustomerName は AI が読んだ生の社名で、社名欄を編集しても書き換えない。
+  const [ocrCustomerName, setOcrCustomerName] = useState("");
+  const [customerNameFromMemory, setCustomerNameFromMemory] = useState(false);
+
   const supportsFsAccess = typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
 
   useEffect(() => {
@@ -314,6 +319,9 @@ export function OcrUploadWorkbench() {
     const firstDocumentDate = fileResults.find((file) => file.documentDate)?.documentDate ?? "";
     setFileDate(structured.fileDate ?? firstDocumentDate);
     setFileCustomerName(structured.fileCustomerName ?? structured.customerName ?? upload.customerName ?? "");
+    // customerName は OCR の生の読み取り値（保存先解決にも使う値）。学習のキーになるので別に持つ。
+    setOcrCustomerName(structured.customerName ?? upload.customerName ?? "");
+    setCustomerNameFromMemory(structured.customerNameAppliedFromMemory === true);
     setEditableFileResults(fileResults);
   }, []);
 
@@ -482,6 +490,36 @@ export function OcrUploadWorkbench() {
     setInfoMessage("社名と日付を全ファイルのファイル名へ反映しました。個別に直すこともできます。");
   };
 
+  /**
+   * 学習の記録。保存が成功した瞬間だけ呼ぶ。
+   * ocrValue には必ず「AI が読んだ生の社名」を渡すこと（自動反映後の値ではない）。
+   * 適用後の値をキーにすると別エントリが増えるだけで、元の誤読が直らない。
+   */
+  const recordNamingMemory = useCallback(async (): Promise<number> => {
+    if (!defaultTab) return 0;
+
+    // 自動反映されたまま手を加えていない場合は、既に辞書にある内容なので送らない。
+    if (customerNameFromMemory) return 0;
+
+    const ocrValue = ocrCustomerName.trim();
+    const confirmedValue = fileCustomerName.trim();
+    if (!ocrValue || !confirmedValue || ocrValue === confirmedValue) return 0;
+
+    try {
+      const result = await apiFetch<{ learned: number }>("/naming-memory/record", {
+        method: "POST",
+        body: JSON.stringify({ tabId: defaultTab.id, entries: [{ ocrValue, confirmedValue }] }),
+      });
+      return result.learned ?? 0;
+    } catch {
+      // 学習は補助機能。失敗してもファイルの保存自体は完了しているため、エラーは出さない。
+      return 0;
+    }
+  }, [defaultTab, customerNameFromMemory, ocrCustomerName, fileCustomerName]);
+
+  const learnedMessage = (learned: number) =>
+    learned > 0 ? "社名の修正を記憶しました。次回から自動で反映されます。" : "";
+
   const handleUseOcrDate = () => {
     const nextDate = editableFileResults.find((file) => file.documentDate)?.documentDate ?? "";
     if (nextDate) {
@@ -551,9 +589,13 @@ export function OcrUploadWorkbench() {
         method: "POST",
       });
 
+      const learned = await recordNamingMemory();
+
       setCurrentUpload(saved);
       hydrateEditableState(saved);
-      setInfoMessage("SharePoint への保存が完了しました。");
+      // 保存後の値はユーザーが確定したもの。自動反映バッジは残さない。
+      setCustomerNameFromMemory(false);
+      setInfoMessage(`SharePoint への保存が完了しました。${learnedMessage(learned)}`);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "SharePoint 保存に失敗しました。");
     } finally {
@@ -609,7 +651,12 @@ export function OcrUploadWorkbench() {
         saved += 1;
       }
 
-      setInfoMessage(`ローカルフォルダ「${localDirName}」へ ${saved} 件を直接保存しました。`);
+      // 保存が全件通ってから学習する。
+      const learned = await recordNamingMemory();
+      setCustomerNameFromMemory(false);
+      setInfoMessage(
+        `ローカルフォルダ「${localDirName}」へ ${saved} 件を直接保存しました。${learnedMessage(learned)}`,
+      );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "ローカル保存に失敗しました。フォルダの権限を確認してください。");
     } finally {
@@ -809,8 +856,28 @@ export function OcrUploadWorkbench() {
                   </div>
                   <div className="grid gap-3 sm:grid-cols-[1fr_0.75fr_auto]">
                     <div>
-                      <label className="mb-1.5 block text-sm font-medium text-[#445063]">ファイル名に使う社名</label>
-                      <input type="text" value={fileCustomerName} onChange={(event) => setFileCustomerName(event.target.value)} className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]" />
+                      <label className="mb-1.5 flex items-center gap-2 text-sm font-medium text-[#445063]">
+                        ファイル名に使う社名
+                        {customerNameFromMemory && (
+                          <span
+                            className="inline-flex items-center gap-1 rounded-full border border-[#a7e3e8] bg-[#effcfd] px-2 py-0.5 text-[10px] font-bold text-[#0e7078]"
+                            title={`AI の読み取り「${ocrCustomerName}」を、前回までに確定した表記へ自動で置き換えました。`}
+                          >
+                            <Sparkles className="h-3 w-3" />
+                            前回の修正を自動反映
+                          </span>
+                        )}
+                      </label>
+                      <input
+                        type="text"
+                        value={fileCustomerName}
+                        onChange={(event) => {
+                          setFileCustomerName(event.target.value);
+                          // 手で直したら以降はユーザー自身の値。バッジを外し、保存時に学習させる。
+                          setCustomerNameFromMemory(false);
+                        }}
+                        className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]"
+                      />
                     </div>
                     <div>
                       <label className="mb-1.5 block text-sm font-medium text-[#445063]">日付</label>

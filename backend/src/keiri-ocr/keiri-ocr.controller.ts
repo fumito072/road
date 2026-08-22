@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Post,
   UploadedFiles,
@@ -22,13 +23,14 @@ export class KeiriOcrController {
   constructor(private readonly keiriOcrService: KeiriOcrService) {}
 
   // 領収書・請求書を受け取り、会社名・金額・取引日を抽出して命名候補を返す。
+  // tabId は学習辞書（過去の修正内容）を引くために使う。未指定でも読み取りは動く。
   @Post('scan')
   @UseInterceptors(
     FilesInterceptor('files', 50, {
       limits: { fileSize: 25 * 1024 * 1024 },
     }),
   )
-  scan(@UploadedFiles() files: UploadedImage[]) {
-    return this.keiriOcrService.scan(files);
+  scan(@UploadedFiles() files: UploadedImage[], @Body('tabId') tabId?: string) {
+    return this.keiriOcrService.scan(files, tabId);
   }
 }

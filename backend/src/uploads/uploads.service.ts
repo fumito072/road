@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { OcrService } from '../ocr/ocr.service';
 import { SharepointFolderEntry, SharepointService } from '../sharepoint/sharepoint.service';
 import { NamingRulesService } from '../naming-rules/naming-rules.service';
+import { NamingMemoryService } from '../naming-memory/naming-memory.service';
 import { CreateUploadDto, ConfirmUploadDto, IntakeUploadDto, ResolveUploadDto } from './uploads.dto';
 import { UploadStatus, Prisma } from '@prisma/client';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -66,6 +67,8 @@ type UploadStructuredResult = {
   destinationFolderName?: string;
   fileCustomerName?: string;
   fileDate?: string;
+  /** 学習辞書からファイル名用の社名を自動反映したか（UI のバッジ表示用）。 */
+  customerNameAppliedFromMemory?: boolean;
   customerNameCandidates?: string[];
   customerKanaCandidates?: string[];
   destinationResolution?: DestinationResolution;
@@ -101,6 +104,7 @@ export class UploadsService {
     private readonly ocrService: OcrService,
     private readonly sharepointService: SharepointService,
     private readonly namingRulesService: NamingRulesService,
+    private readonly namingMemoryService: NamingMemoryService,
   ) {}
 
   findAllByTab(tabId: string, userId: string) {
@@ -259,6 +263,16 @@ export class UploadsService {
       );
 
       const structured = this.normalizeStructuredResult((result.structured ?? {}) as UploadStructuredResult);
+
+      // 過去にユーザーが直した社名があれば、ファイル名用の社名として先に埋めておく。
+      // customerName は SharePoint 保存先の解決に使うため、生の読み取り値のまま触らない。
+      const [memory] = await this.namingMemoryService.applyToCompanies(upload.tabId, [
+        structured.customerName ?? '',
+      ]);
+      if (memory?.applied) {
+        structured.fileCustomerName = memory.value;
+        structured.customerNameAppliedFromMemory = true;
+      }
 
       return this.prisma.upload.update({
         where: { id },
