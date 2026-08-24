@@ -14,6 +14,7 @@ import {
   HardDriveDownload,
   Home,
   Play,
+  RefreshCw,
   Save,
   Send,
   Sparkles,
@@ -73,9 +74,16 @@ type KeiriRow = {
   ocrCompany: string;
   // 過去の修正内容が自動適用された行かどうか。
   appliedFromMemory: boolean;
+  // 「ファイル名へ反映」で確定した保存ファイル名。
+  outputFileName: string;
 };
 
 type DestinationKind = "local" | "sharepoint";
+
+type LocalSaveNotice = {
+  status: "success" | "error";
+  message: string;
+};
 
 function fileExtension(name: string) {
   const i = name.lastIndexOf(".");
@@ -117,6 +125,7 @@ export function KeiriOcrWorkbench() {
   const [rows, setRows] = useState<KeiriRow[]>([]);
   const [currentUpload, setCurrentUpload] = useState<UploadRecord | null>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [isApplyingFileNames, setIsApplyingFileNames] = useState(false);
   const [isSavingLocal, setIsSavingLocal] = useState(false);
   const [isSavingSharepoint, setIsSavingSharepoint] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -128,6 +137,7 @@ export function KeiriOcrWorkbench() {
   // ④-A ローカル（File System Access API）
   const [localDirHandle, setLocalDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [localDirName, setLocalDirName] = useState("");
+  const [localSaveNotice, setLocalSaveNotice] = useState<LocalSaveNotice | null>(null);
 
   // ④-B SharePoint フォルダ選択
   const [sharepointFolderPath, setSharepointFolderPath] = useState("");
@@ -173,6 +183,7 @@ export function KeiriOcrWorkbench() {
     setCurrentUpload(null);
     setError(null);
     setInfo(null);
+    setLocalSaveNotice(null);
   };
 
   const handleScan = async () => {
@@ -180,6 +191,7 @@ export function KeiriOcrWorkbench() {
     setIsRunning(true);
     setError(null);
     setInfo(null);
+    setLocalSaveNotice(null);
     try {
       // ① uploads にファイルを保存（SharePoint 保存・プレビューに必要）＋ ② 経理OCRで抽出。
       const intakeForm = new FormData();
@@ -203,7 +215,7 @@ export function KeiriOcrWorkbench() {
           createdUpload.files.find((f) => f.originalFileName === item.file.name) ??
           createdUpload.files[index];
         const s = scan.files[index];
-        return {
+        const row: Omit<KeiriRow, "outputFileName"> = {
           id: uploadFile?.id ?? item.id,
           file: item.file,
           originalFileName: uploadFile?.originalFileName ?? item.file.name,
@@ -214,6 +226,10 @@ export function KeiriOcrWorkbench() {
           documentType: s?.documentType ?? "",
           ocrCompany: s?.ocrCompany ?? s?.company ?? "",
           appliedFromMemory: s?.appliedFromMemory ?? false,
+        };
+        return {
+          ...row,
+          outputFileName: s?.suggestedName || buildKeiriName(row),
         };
       });
 
@@ -268,7 +284,7 @@ export function KeiriOcrWorkbench() {
   };
 
   /**
-   * 学習の記録。保存が成功した瞬間だけ呼ぶ。
+   * 「ファイル名へ反映」が押された時に会社名の修正を記録する。
    * 入力途中の値や打ち間違いを覚えないよう、onChange では記録しない。
    * ocrValue には必ず「AI が読んだ生の値」を渡すこと（自動適用後の値ではない）。
    */
@@ -285,24 +301,58 @@ export function KeiriOcrWorkbench() {
 
       if (entries.length === 0) return 0;
 
-      try {
-        const result = await apiFetch<{ learned: number }>("/naming-memory/record", {
-          method: "POST",
-          body: JSON.stringify({ tabId: defaultTab.id, entries }),
-        });
-        return result.learned ?? 0;
-      } catch {
-        // 学習は補助機能。失敗してもファイルの保存自体は完了しているため、エラーは出さない。
-        return 0;
-      }
+      const result = await apiFetch<{ learned: number }>("/naming-memory/record", {
+        method: "POST",
+        body: JSON.stringify({ tabId: defaultTab.id, entries }),
+      });
+      return result.learned ?? 0;
     },
     [defaultTab],
   );
 
-  const learnedMessage = (learned: number) =>
-    learned > 0
-      ? `会社名の修正 ${learned} 件を記憶しました。次回から自動で反映されます。`
-      : "";
+  const handleApplyFileNames = async () => {
+    if (!currentUpload || rows.length === 0 || isApplyingFileNames) return;
+
+    const appliedRows = rows.map((row) => ({
+      ...row,
+      outputFileName: buildKeiriName(row),
+    }));
+    setRows(appliedRows);
+    setIsApplyingFileNames(true);
+    setError(null);
+    setInfo(null);
+
+    let fileNamesSaved = false;
+    try {
+      const fileResults: UploadFileResult[] = appliedRows.map((row) => ({
+        originalFileName: row.originalFileName,
+        outputFileName: row.outputFileName,
+        documentType: row.documentType,
+        documentDate: row.date,
+      }));
+      const savedUpload = await apiFetch<UploadRecord>(`/uploads/${currentUpload.id}/file-names`, {
+        method: "POST",
+        body: JSON.stringify({ fileResults }),
+      });
+      fileNamesSaved = true;
+      setCurrentUpload(savedUpload);
+
+      const learned = await recordNamingMemory(appliedRows);
+      setInfo(
+        learned > 0
+          ? `ファイル名と会社名の修正 ${learned} 件を保存しました。次回から会社名を自動で反映します。`
+          : "購入日・会社名・金額を保存ファイル名へ反映し、保存しました。",
+      );
+    } catch {
+      setError(
+        fileNamesSaved
+          ? "ファイル名は保存しましたが、会社名の修正履歴を保存できませんでした。もう一度お試しください。"
+          : "ファイル名を画面へ反映しましたが、保存できませんでした。もう一度お試しください。",
+      );
+    } finally {
+      setIsApplyingFileNames(false);
+    }
+  };
 
   // ④-A ローカルフォルダを選ぶ
   const handleChooseLocalDir = async () => {
@@ -315,6 +365,7 @@ export function KeiriOcrWorkbench() {
       setLocalDirHandle(handle);
       setLocalDirName(handle.name);
       setError(null);
+      setLocalSaveNotice(null);
     } catch {
       // ユーザーがキャンセルした場合は何もしない
     }
@@ -329,23 +380,24 @@ export function KeiriOcrWorkbench() {
     setIsSavingLocal(true);
     setError(null);
     setInfo(null);
+    setLocalSaveNotice(null);
     try {
       let saved = 0;
       for (const row of rows) {
-        const name = buildKeiriName(row);
+        const name = row.outputFileName.trim() || buildKeiriName(row);
         const handle = await localDirHandle.getFileHandle(name, { create: true });
         const writable = await handle.createWritable();
         await writable.write(row.file);
         await writable.close();
         saved += 1;
       }
-      // 保存が全件通ってから学習する。
-      const learned = await recordNamingMemory(rows);
-      setInfo(
-        `ローカルフォルダ「${localDirName}」へ ${saved} 件を直接保存しました。${learnedMessage(learned)}`,
-      );
+      const message = `ローカルフォルダ「${localDirName}」へ ${saved} 件を直接保存しました。`;
+      setInfo(message);
+      setLocalSaveNotice({ status: "success", message });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "ローカル保存に失敗しました。フォルダの権限を確認してください。");
+      const message = err instanceof Error ? err.message : "ローカル保存に失敗しました。フォルダの権限を確認してください。";
+      setError(message);
+      setLocalSaveNotice({ status: "error", message });
     } finally {
       setIsSavingLocal(false);
     }
@@ -392,7 +444,7 @@ export function KeiriOcrWorkbench() {
       // バックエンドがこの名前でリネームして SharePoint にアップロードする。
       const fileResults: UploadFileResult[] = rows.map((row) => ({
         originalFileName: row.originalFileName,
-        outputFileName: buildKeiriName(row),
+        outputFileName: row.outputFileName.trim() || buildKeiriName(row),
         documentType: row.documentType,
         documentDate: row.date,
       }));
@@ -415,10 +467,8 @@ export function KeiriOcrWorkbench() {
         method: "POST",
       });
 
-      const learned = await recordNamingMemory(rows);
-
       setCurrentUpload(saved);
-      setInfo(`SharePoint への保存が完了しました。${learnedMessage(learned)}`);
+      setInfo("SharePoint への保存が完了しました。");
     } catch (err) {
       setError(err instanceof Error ? err.message : "SharePoint 保存に失敗しました。");
     } finally {
@@ -574,13 +624,26 @@ export function KeiriOcrWorkbench() {
               <>
                 {/* ③ ファイル名編集 */}
                 <div className="space-y-4 rounded-sm border border-[#e5ebf1] bg-[#fbfcfe] p-4">
-                  <div className="flex items-center gap-2">
-                    <FilePenLine className="h-4 w-4 text-[#12919b]" />
-                    <p className="text-sm font-semibold text-[#334154]">③ 読み取り結果の編集</p>
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <FilePenLine className="h-4 w-4 text-[#12919b]" />
+                        <p className="text-sm font-semibold text-[#334154]">③ 読み取り結果の編集</p>
+                      </div>
+                      <p className="mt-1 text-xs text-[#7c8795]">
+                        命名規則: 購入日_会社名_金額（拡張子は元ファイルのまま）。入力後に「ファイル名へ反映」を押すと、会社名の修正も保存されます。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleApplyFileNames()}
+                      disabled={isApplyingFileNames}
+                      className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#44cfd8] bg-white px-4 py-2 text-sm font-bold text-[#12919b] transition hover:bg-[#f3feff] disabled:cursor-not-allowed disabled:border-[#d0d5db] disabled:text-[#98a2ad]"
+                    >
+                      <RefreshCw className="h-4 w-4" />
+                      {isApplyingFileNames ? "反映・保存中" : "ファイル名へ反映"}
+                    </button>
                   </div>
-                  <p className="text-xs text-[#7c8795]">
-                    命名規則: 購入日_会社名_金額（拡張子は元ファイルのまま）。日付・会社名・金額を直すとファイル名に反映されます。元ファイル名を押すとプレビューを表示します。
-                  </p>
 
                   {rows.map((row) => (
                     <div key={row.id} className="rounded-sm border border-[#e5ebf1] bg-white p-4">
@@ -673,7 +736,7 @@ export function KeiriOcrWorkbench() {
                           保存ファイル名
                         </span>
                         <code className="block truncate rounded-sm bg-[#eef4f8] px-3 py-2 text-sm font-semibold text-[#1f2b37]">
-                          {buildKeiriName(row)}
+                          {row.outputFileName}
                         </code>
                       </div>
                     </div>
@@ -719,6 +782,28 @@ export function KeiriOcrWorkbench() {
                         <Save className="h-4 w-4" />
                         {isSavingLocal ? "保存中" : "このフォルダへ直接保存する"}
                       </button>
+                      {localSaveNotice && (
+                        <div
+                          role="status"
+                          className={`flex items-start gap-3 rounded-sm border px-4 py-3 ${
+                            localSaveNotice.status === "success"
+                              ? "border-[#9fddd6] bg-[#eafaf7] text-[#147a73]"
+                              : "border-[#f2bfd2] bg-[#fff3f8] text-[#b43a6a]"
+                          }`}
+                        >
+                          {localSaveNotice.status === "success" ? (
+                            <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" />
+                          ) : (
+                            <CircleAlert className="mt-0.5 h-5 w-5 shrink-0" />
+                          )}
+                          <div>
+                            <p className="text-sm font-bold">
+                              {localSaveNotice.status === "success" ? "保存完了" : "保存できませんでした"}
+                            </p>
+                            <p className="mt-1 text-xs leading-relaxed">{localSaveNotice.message}</p>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div className="space-y-3">

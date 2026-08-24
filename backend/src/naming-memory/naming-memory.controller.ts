@@ -24,7 +24,7 @@ export class NamingMemoryController {
     return this.namingMemoryService.list(tabId);
   }
 
-  // 保存ボタン押下時に呼ばれる。ユーザーが直した表記を次回以降に引き継ぐ。
+  // 「ファイル名へ反映」押下時に呼ばれる。ユーザーが直した表記を次回以降に引き継ぐ。
   @Post('record')
   record(
     @Body() dto: RecordNamingMemoryDto,

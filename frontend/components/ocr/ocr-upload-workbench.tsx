@@ -66,6 +66,11 @@ type EditableFileResult = {
 
 type DestinationKind = "local" | "sharepoint";
 
+type LocalSaveNotice = {
+  status: "success" | "error";
+  message: string;
+};
+
 const statusLabel: Record<QueueStatus, string> = {
   ready: "待機中",
   processing: "実行中",
@@ -267,6 +272,7 @@ export function OcrUploadWorkbench() {
 
   const [currentUpload, setCurrentUpload] = useState<UploadRecord | null>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [isApplyingFileNames, setIsApplyingFileNames] = useState(false);
   const [isSavingSharepoint, setIsSavingSharepoint] = useState(false);
   const [isSavingLocal, setIsSavingLocal] = useState(false);
   const [lastRunLabel, setLastRunLabel] = useState("未実行");
@@ -284,6 +290,7 @@ export function OcrUploadWorkbench() {
   // ④-A ローカル（File System Access API）
   const [localDirHandle, setLocalDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [localDirName, setLocalDirName] = useState("");
+  const [localSaveNotice, setLocalSaveNotice] = useState<LocalSaveNotice | null>(null);
 
   // ④-B SharePoint フォルダ選択
   const [sharepointFolderPath, setSharepointFolderPath] = useState("");
@@ -440,6 +447,7 @@ export function OcrUploadWorkbench() {
     setIsRunning(true);
     setErrorMessage(null);
     setInfoMessage(null);
+    setLocalSaveNotice(null);
     setQueue((current) => current.map((file) => ({ ...file, status: "processing" })));
 
     try {
@@ -479,19 +487,8 @@ export function OcrUploadWorkbench() {
     }
   };
 
-  const handleApplyFileNameTemplate = () => {
-    setEditableFileResults((current) =>
-      current.map((file) => ({
-        ...file,
-        documentDate: fileDate,
-        outputFileName: buildOutputFileName(fileDate, fileCustomerName, file.documentType),
-      })),
-    );
-    setInfoMessage("社名と日付を全ファイルのファイル名へ反映しました。個別に直すこともできます。");
-  };
-
   /**
-   * 学習の記録。保存が成功した瞬間だけ呼ぶ。
+   * 「ファイル名へ反映」が押された時に会社名の修正を記録する。
    * ocrValue には必ず「AI が読んだ生の社名」を渡すこと（自動反映後の値ではない）。
    * 適用後の値をキーにすると別エントリが増えるだけで、元の誤読が直らない。
    */
@@ -505,20 +502,55 @@ export function OcrUploadWorkbench() {
     const confirmedValue = fileCustomerName.trim();
     if (!ocrValue || !confirmedValue || ocrValue === confirmedValue) return 0;
 
-    try {
-      const result = await apiFetch<{ learned: number }>("/naming-memory/record", {
-        method: "POST",
-        body: JSON.stringify({ tabId: defaultTab.id, entries: [{ ocrValue, confirmedValue }] }),
-      });
-      return result.learned ?? 0;
-    } catch {
-      // 学習は補助機能。失敗してもファイルの保存自体は完了しているため、エラーは出さない。
-      return 0;
-    }
+    const result = await apiFetch<{ learned: number }>("/naming-memory/record", {
+      method: "POST",
+      body: JSON.stringify({ tabId: defaultTab.id, entries: [{ ocrValue, confirmedValue }] }),
+    });
+    return result.learned ?? 0;
   }, [defaultTab, customerNameFromMemory, ocrCustomerName, fileCustomerName]);
 
-  const learnedMessage = (learned: number) =>
-    learned > 0 ? "社名の修正を記憶しました。次回から自動で反映されます。" : "";
+  const handleApplyFileNameTemplate = async () => {
+    if (!currentUpload || isApplyingFileNames) return;
+
+    const appliedFileResults = editableFileResults.map((file) => ({
+      ...file,
+      documentDate: fileDate,
+      outputFileName: buildOutputFileName(fileDate, fileCustomerName, file.documentType),
+    }));
+    setEditableFileResults(appliedFileResults);
+    setIsApplyingFileNames(true);
+    setErrorMessage(null);
+    setInfoMessage(null);
+
+    let fileNamesSaved = false;
+    try {
+      const savedUpload = await apiFetch<UploadRecord>(`/uploads/${currentUpload.id}/file-names`, {
+        method: "POST",
+        body: JSON.stringify({
+          fileCustomerName,
+          fileDate,
+          fileResults: appliedFileResults,
+        }),
+      });
+      fileNamesSaved = true;
+      setCurrentUpload(savedUpload);
+
+      const learned = await recordNamingMemory();
+      setInfoMessage(
+        learned > 0
+          ? "ファイル名と社名の修正を保存しました。次回から社名を自動で反映します。"
+          : "社名と日付を全ファイルのファイル名へ反映し、保存しました。個別に直すこともできます。",
+      );
+    } catch {
+      setErrorMessage(
+        fileNamesSaved
+          ? "ファイル名は保存しましたが、社名の修正履歴を保存できませんでした。もう一度お試しください。"
+          : "ファイル名を画面へ反映しましたが、保存できませんでした。もう一度お試しください。",
+      );
+    } finally {
+      setIsApplyingFileNames(false);
+    }
+  };
 
   const handleUseOcrDate = () => {
     const nextDate = editableFileResults.find((file) => file.documentDate)?.documentDate ?? "";
@@ -589,13 +621,9 @@ export function OcrUploadWorkbench() {
         method: "POST",
       });
 
-      const learned = await recordNamingMemory();
-
       setCurrentUpload(saved);
       hydrateEditableState(saved);
-      // 保存後の値はユーザーが確定したもの。自動反映バッジは残さない。
-      setCustomerNameFromMemory(false);
-      setInfoMessage(`SharePoint への保存が完了しました。${learnedMessage(learned)}`);
+      setInfoMessage("SharePoint への保存が完了しました。");
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "SharePoint 保存に失敗しました。");
     } finally {
@@ -615,6 +643,7 @@ export function OcrUploadWorkbench() {
       setLocalDirHandle(handle);
       setLocalDirName(handle.name);
       setErrorMessage(null);
+      setLocalSaveNotice(null);
     } catch {
       // ユーザーがキャンセルした場合は何もしない
     }
@@ -633,6 +662,7 @@ export function OcrUploadWorkbench() {
     setIsSavingLocal(true);
     setErrorMessage(null);
     setInfoMessage(null);
+    setLocalSaveNotice(null);
 
     try {
       let saved = 0;
@@ -651,14 +681,13 @@ export function OcrUploadWorkbench() {
         saved += 1;
       }
 
-      // 保存が全件通ってから学習する。
-      const learned = await recordNamingMemory();
-      setCustomerNameFromMemory(false);
-      setInfoMessage(
-        `ローカルフォルダ「${localDirName}」へ ${saved} 件を直接保存しました。${learnedMessage(learned)}`,
-      );
+      const message = `ローカルフォルダ「${localDirName}」へ ${saved} 件を直接保存しました。`;
+      setInfoMessage(message);
+      setLocalSaveNotice({ status: "success", message });
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "ローカル保存に失敗しました。フォルダの権限を確認してください。");
+      const message = error instanceof Error ? error.message : "ローカル保存に失敗しました。フォルダの権限を確認してください。";
+      setErrorMessage(message);
+      setLocalSaveNotice({ status: "error", message });
     } finally {
       setIsSavingLocal(false);
     }
@@ -847,11 +876,11 @@ export function OcrUploadWorkbench() {
                         <FilePenLine className="h-4 w-4 text-[#12919b]" />
                         <p className="text-sm font-semibold text-[#334154]">③ アップロードファイル名の編集</p>
                       </div>
-                      <p className="mt-1 text-xs text-[#7c8795]">命名規則: 日付_社名_書類種別.pdf（社名内のスペースは保持）。同一顧客でない場合は各ファイルを個別に直せます。</p>
+                      <p className="mt-1 text-xs text-[#7c8795]">命名規則: 日付_社名_書類種別.pdf（社名内のスペースは保持）。入力後に「ファイル名へ反映」を押すと、社名の修正も保存されます。</p>
                     </div>
-                    <button type="button" onClick={handleApplyFileNameTemplate} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#44cfd8] bg-white px-4 py-2 text-sm font-bold text-[#12919b] transition hover:bg-[#f3feff]">
+                    <button type="button" onClick={() => void handleApplyFileNameTemplate()} disabled={isApplyingFileNames} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#44cfd8] bg-white px-4 py-2 text-sm font-bold text-[#12919b] transition hover:bg-[#f3feff] disabled:cursor-not-allowed disabled:border-[#d0d5db] disabled:text-[#98a2ad]">
                       <RefreshCw className="h-4 w-4" />
-                      ファイル名へ反映（任意）
+                      {isApplyingFileNames ? "反映・保存中" : "ファイル名へ反映"}
                     </button>
                   </div>
                   <div className="grid gap-3 sm:grid-cols-[1fr_0.75fr_auto]">
@@ -982,6 +1011,28 @@ export function OcrUploadWorkbench() {
                         <Save className="h-4 w-4" />
                         {isSavingLocal ? "保存中" : "このフォルダへ直接保存する"}
                       </button>
+                      {localSaveNotice && (
+                        <div
+                          role="status"
+                          className={`flex items-start gap-3 rounded-sm border px-4 py-3 ${
+                            localSaveNotice.status === "success"
+                              ? "border-[#9fddd6] bg-[#eafaf7] text-[#147a73]"
+                              : "border-[#f2bfd2] bg-[#fff3f8] text-[#b43a6a]"
+                          }`}
+                        >
+                          {localSaveNotice.status === "success" ? (
+                            <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" />
+                          ) : (
+                            <CircleAlert className="mt-0.5 h-5 w-5 shrink-0" />
+                          )}
+                          <div>
+                            <p className="text-sm font-bold">
+                              {localSaveNotice.status === "success" ? "保存完了" : "保存できませんでした"}
+                            </p>
+                            <p className="mt-1 text-xs leading-relaxed">{localSaveNotice.message}</p>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div className="space-y-3">

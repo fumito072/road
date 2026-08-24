@@ -5,6 +5,8 @@ import {
   CheckCircle2,
   CircleAlert,
   ExternalLink,
+  FileDown,
+  FileSpreadsheet,
   RefreshCw,
   Search,
   Trash2,
@@ -14,45 +16,12 @@ import {
 import { apiFetch } from "@/lib/api";
 import { UploadDropzone } from "@/components/common/upload-dropzone";
 import { formatBytes, type DroppedFile } from "@/lib/file-drop";
-
-type MemberCheckMatch = {
-  source: "contact" | "torihikisaki_tantou";
-  sourceLabel: string;
-  id: string;
-  name: string;
-  kana: string | null;
-  company: string | null;
-  url: string;
-};
-
-type MemberCheckSalesforce = {
-  configured: boolean;
-  query: string;
-  lastName: string;
-  firstName: string;
-  exists: boolean;
-  matchCount: number;
-  matches: MemberCheckMatch[];
-};
-
-type MemberCheckPersonResult = {
-  group: string;
-  lastName: string;
-  firstName: string;
-  fullName: string;
-  kana: string;
-  handicap: string;
-  note: string;
-  salesforce: MemberCheckSalesforce;
-};
-
-type MemberCheckResult = {
-  totalPeople: number;
-  matchedCount: number;
-  confidence: number;
-  salesforceConfigured: boolean;
-  people: MemberCheckPersonResult[];
-};
+import {
+  exportMemberCheckExcel,
+  exportMemberCheckPdf,
+  type MemberCheckPersonResult,
+  type MemberCheckResult,
+} from "@/lib/member-check-export";
 
 type ScanJobAck = {
   jobId: string;
@@ -98,9 +67,15 @@ export function MemberCheckWorkbench() {
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<MemberCheckResult | null>(null);
+  const [exporting, setExporting] = useState<"pdf" | "excel" | null>(null);
+  const [exportNotice, setExportNotice] = useState<{
+    status: "success" | "error";
+    message: string;
+  } | null>(null);
 
   const addFiles = useCallback((incoming: DroppedFile[]) => {
     setResult(null);
+    setExportNotice(null);
     setQueue((current) => [
       ...current,
       ...incoming.map((item, index) => ({
@@ -117,6 +92,7 @@ export function MemberCheckWorkbench() {
     setQueue([]);
     setResult(null);
     setError(null);
+    setExportNotice(null);
   };
 
   const handleScan = useCallback(async () => {
@@ -124,6 +100,7 @@ export function MemberCheckWorkbench() {
     setIsScanning(true);
     setError(null);
     setResult(null);
+    setExportNotice(null);
     try {
       // 1) スキャンを受付（即ジョブIDが返る）。長い処理でもここでは待たないのでタイムアウトしない。
       const form = new FormData();
@@ -163,6 +140,36 @@ export function MemberCheckWorkbench() {
       setIsScanning(false);
     }
   }, [queue]);
+
+  const handleExport = useCallback(
+    async (format: "pdf" | "excel") => {
+      if (!result || exporting) return;
+      setExporting(format);
+      setExportNotice(null);
+      try {
+        const options = { sourceFileNames: queue.map((item) => item.file.name) };
+        const fileName =
+          format === "pdf"
+            ? await exportMemberCheckPdf(result, options)
+            : await exportMemberCheckExcel(result, options);
+        setExportNotice({
+          status: "success",
+          message: `${fileName} を保存しました。`,
+        });
+      } catch (err) {
+        setExportNotice({
+          status: "error",
+          message:
+            err instanceof Error
+              ? err.message
+              : `${format === "pdf" ? "PDF" : "Excel"}の保存に失敗しました。`,
+        });
+      } finally {
+        setExporting(null);
+      }
+    },
+    [exporting, queue, result],
+  );
 
   return (
     <div className="min-h-screen bg-[#f5f7fb] text-[#222b38]">
@@ -312,6 +319,62 @@ export function MemberCheckWorkbench() {
                       Salesforceが未設定のため照合できませんでした（抽出のみ）。.envの設定をご確認ください。
                     </div>
                   )}
+
+                  <div className="rounded-sm border border-[#dbe4ec] bg-[#f8fbfd] p-4">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                      <div>
+                        <p className="text-sm font-bold text-[#334154]">照合結果を保存</p>
+                        <p className="mt-1 text-xs text-[#7c8795]">
+                          PDFは印刷向けの帳票、Excelは編集・並べ替え可能な一覧として保存します。
+                        </p>
+                      </div>
+                      <div className="flex flex-col gap-2 sm:flex-row">
+                        <button
+                          type="button"
+                          onClick={() => void handleExport("pdf")}
+                          disabled={exporting !== null}
+                          className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#d5dee8] bg-white px-4 py-2 text-sm font-bold text-[#445063] transition hover:border-[#44cfd8] hover:text-[#12919b] disabled:cursor-not-allowed disabled:bg-[#f1f4f7] disabled:text-[#98a2ad]"
+                        >
+                          {exporting === "pdf" ? (
+                            <RefreshCw className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <FileDown className="h-4 w-4" />
+                          )}
+                          {exporting === "pdf" ? "PDF作成中" : "PDFで保存"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleExport("excel")}
+                          disabled={exporting !== null}
+                          className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#44cfd8] bg-white px-4 py-2 text-sm font-bold text-[#12919b] transition hover:bg-[#f3feff] disabled:cursor-not-allowed disabled:border-[#d0d5db] disabled:text-[#98a2ad]"
+                        >
+                          {exporting === "excel" ? (
+                            <RefreshCw className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <FileSpreadsheet className="h-4 w-4" />
+                          )}
+                          {exporting === "excel" ? "Excel作成中" : "Excelで保存"}
+                        </button>
+                      </div>
+                    </div>
+                    {exportNotice && (
+                      <div
+                        role="status"
+                        className={`mt-3 flex items-start gap-2 rounded-sm border px-3 py-2 text-sm ${
+                          exportNotice.status === "success"
+                            ? "border-[#bfece6] bg-[#eefdfa] text-[#1e8f88]"
+                            : "border-[#f2bfd2] bg-[#fff3f8] text-[#b43a6a]"
+                        }`}
+                      >
+                        {exportNotice.status === "success" ? (
+                          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+                        ) : (
+                          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                        )}
+                        <span>{exportNotice.message}</span>
+                      </div>
+                    )}
+                  </div>
 
                   <ul className="divide-y divide-[#eef2f6] overflow-hidden rounded-sm border border-[#e7edf3]">
                     {result.people.map((person, index) => {

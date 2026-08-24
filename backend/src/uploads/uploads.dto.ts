@@ -1,4 +1,11 @@
-import { IsIn, IsString, IsOptional, IsArray, ValidateNested } from 'class-validator';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsIn,
+  IsOptional,
+  IsString,
+  ValidateNested,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class UploadFileDto {
@@ -95,4 +102,36 @@ export class IntakeUploadDto {
   @IsString()
   @IsOptional()
   contractNumber?: string;
+}
+
+export class SaveFileNameResultDto {
+  @IsString()
+  originalFileName!: string;
+
+  @IsString()
+  outputFileName!: string;
+
+  @IsString()
+  @IsOptional()
+  documentType?: string;
+
+  @IsString()
+  @IsOptional()
+  documentDate?: string;
+}
+
+export class SaveFileNamesDto {
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ValidateNested({ each: true })
+  @Type(() => SaveFileNameResultDto)
+  fileResults!: SaveFileNameResultDto[];
+
+  @IsString()
+  @IsOptional()
+  fileCustomerName?: string;
+
+  @IsString()
+  @IsOptional()
+  fileDate?: string;
 }

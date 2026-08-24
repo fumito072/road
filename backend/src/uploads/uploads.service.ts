@@ -4,7 +4,13 @@ import { OcrService } from '../ocr/ocr.service';
 import { SharepointFolderEntry, SharepointService } from '../sharepoint/sharepoint.service';
 import { NamingRulesService } from '../naming-rules/naming-rules.service';
 import { NamingMemoryService } from '../naming-memory/naming-memory.service';
-import { CreateUploadDto, ConfirmUploadDto, IntakeUploadDto, ResolveUploadDto } from './uploads.dto';
+import {
+  ConfirmUploadDto,
+  CreateUploadDto,
+  IntakeUploadDto,
+  ResolveUploadDto,
+  SaveFileNamesDto,
+} from './uploads.dto';
 import { UploadStatus, Prisma } from '@prisma/client';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -461,6 +467,51 @@ export class UploadsService {
         applicationNumber: nextStructured.applicationNumber ?? null,
         ocrStructuredResult: nextStructured as unknown as Prisma.InputJsonValue,
         confirmedAt: new Date(),
+      },
+      include: { files: true },
+    });
+  }
+
+  /**
+   * UI の「ファイル名へ反映」で確定した名前を保存する。
+   * 保存先の確定とは独立させ、UploadStatus は変更しない。
+   */
+  async saveFileNames(id: string, userId: string, dto: SaveFileNamesDto) {
+    const upload = await this.findOne(id, userId);
+    const uploadFileNames = new Set(upload.files.map((file) => file.originalFileName));
+    const unknownFile = dto.fileResults.find(
+      (file) => !uploadFileNames.has(file.originalFileName),
+    );
+
+    if (unknownFile) {
+      throw new BadRequestException(
+        `File "${unknownFile.originalFileName}" does not belong to this upload`,
+      );
+    }
+
+    const currentStructured = (upload.ocrStructuredResult ?? {}) as UploadStructuredResult;
+    const currentByName = new Map(
+      (currentStructured.fileResults ?? [])
+        .filter((file) => file.originalFileName)
+        .map((file) => [file.originalFileName as string, file]),
+    );
+    const fileResults: StructuredFileResult[] = dto.fileResults.map((file) => ({
+      ...(currentByName.get(file.originalFileName) ?? {}),
+      ...file,
+    }));
+    const nextStructured: UploadStructuredResult = {
+      ...currentStructured,
+      ...(dto.fileCustomerName !== undefined
+        ? { fileCustomerName: dto.fileCustomerName }
+        : {}),
+      ...(dto.fileDate !== undefined ? { fileDate: dto.fileDate } : {}),
+      fileResults,
+    };
+
+    return this.prisma.upload.update({
+      where: { id },
+      data: {
+        ocrStructuredResult: nextStructured as unknown as Prisma.InputJsonValue,
       },
       include: { files: true },
     });

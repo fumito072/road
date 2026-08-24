@@ -14,7 +14,13 @@ import {
 import { FilesInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import { UploadsService } from './uploads.service';
-import { CreateUploadDto, ConfirmUploadDto, IntakeUploadDto, ResolveUploadDto } from './uploads.dto';
+import {
+  ConfirmUploadDto,
+  CreateUploadDto,
+  IntakeUploadDto,
+  ResolveUploadDto,
+  SaveFileNamesDto,
+} from './uploads.dto';
 import { AuthGuard } from '../common/guards/auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 
@@ -98,6 +104,15 @@ export class UploadsController {
     @CurrentUser() user: { id: string },
   ) {
     return this.uploadsService.confirm(id, user.id, dto);
+  }
+
+  @Post(':id/file-names')
+  saveFileNames(
+    @Param('id') id: string,
+    @Body() dto: SaveFileNamesDto,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.uploadsService.saveFileNames(id, user.id, dto);
   }
 
   @Post(':id/sharepoint')
