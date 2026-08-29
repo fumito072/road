@@ -48,12 +48,15 @@ model Tab {
   @@map("tabs")
 }
 
-/// OCR が読み取った取引先名と、ユーザーが保存時に確定した表記の対応表。
+/// OCR が読み取った値と、ユーザーが確定した表記の対応表。
 /// 「毎回同じ修正をさせない」ための学習データで、タブ単位で全ユーザーが共有する。
 model VendorAlias {
   id           String   @id @default(cuid())
   tabId        String
-  /// OCR の読み取り値を正規化したキー（NFKC・会社種別除去・空白除去・小文字化）。
+  /// 学習対象の項目。company（社名・顧客名）/ documentType（書類種別・明細の種類）/ carrier（キャリア名）。
+  /// 項目ごとに辞書を分けないと、別項目の同じ文字列が互いに干渉する。
+  field        String   @default("company")
+  /// OCR の読み取り値を正規化したキー（NFKC・空白除去・小文字化。company のみ会社種別も除去）。
   matchKey     String
   /// ユーザーが確定した表記。次回以降はこの値を自動で入れる。
   correctedTo  String
@@ -68,8 +71,8 @@ model VendorAlias {
 
   tab Tab @relation(fields: [tabId], references: [id], onDelete: Cascade)
 
-  @@unique([tabId, matchKey])
-  @@index([tabId])
+  @@unique([tabId, field, matchKey])
+  @@index([tabId, field])
   @@map("vendor_aliases")
 }
 

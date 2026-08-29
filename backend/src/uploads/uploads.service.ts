@@ -29,6 +29,10 @@ type StructuredFileResult = {
   documentDate?: string;
   confidence?: number;
   reason?: string;
+  /** AI が読んだ生の書類種別。学習のキーに使うので辞書適用後の値で上書きしない。 */
+  ocrDocumentType?: string;
+  /** 学習辞書から書類種別を自動反映したか（UI のバッジ表示用）。 */
+  documentTypeAppliedFromMemory?: boolean;
 };
 
 type DestinationCandidate = {
@@ -280,6 +284,30 @@ export class UploadsService {
         structured.customerNameAppliedFromMemory = true;
       }
 
+      // 書類種別も同様に、過去の修正内容を反映してからファイル名を作り直す。
+      const currentFileResults = structured.fileResults ?? [];
+      if (currentFileResults.length > 0) {
+        const appliedTypes = await this.namingMemoryService.applyToValues(
+          upload.tabId,
+          'documentType',
+          currentFileResults.map((file) => file.documentType ?? ''),
+        );
+        structured.fileResults = currentFileResults.map((file, index) => {
+          const applied = appliedTypes[index];
+          if (!applied?.applied) {
+            return { ...file, ocrDocumentType: file.documentType };
+          }
+          return {
+            ...file,
+            documentType: applied.value,
+            // 学習のキーになる生の読み取り値を残す（適用後の値をキーにすると誤読が直らない）。
+            ocrDocumentType: file.documentType,
+            documentTypeAppliedFromMemory: true,
+            outputFileName: this.rebuildOutputFileName(file, structured, applied.value),
+          };
+        });
+      }
+
       return this.prisma.upload.update({
         where: { id },
         data: {
@@ -470,6 +498,25 @@ export class UploadsService {
       },
       include: { files: true },
     });
+  }
+
+  /**
+   * 書類種別を学習辞書で置き換えた際に、表示中のファイル名も作り直す。
+   * 命名規則は OcrService.buildStandardFileName と同じ「日付_社名_書類種別.pdf」。
+   */
+  private rebuildOutputFileName(
+    file: StructuredFileResult,
+    structured: UploadStructuredResult,
+    documentType: string,
+  ): string {
+    const date = file.documentDate?.trim() || structured.fileDate?.trim() || '';
+    const customerName = structured.fileCustomerName?.trim() || structured.customerName?.trim() || '';
+    const safe = [date, customerName, documentType]
+      .map((segment) => segment.trim().replace(/[\\/:*?"<>|]+/g, ' '))
+      .filter(Boolean)
+      .join('_');
+
+    return safe ? `${safe}.pdf` : (file.outputFileName ?? '');
   }
 
   /**

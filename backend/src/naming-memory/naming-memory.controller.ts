@@ -20,8 +20,8 @@ export class NamingMemoryController {
   constructor(private readonly namingMemoryService: NamingMemoryService) {}
 
   @Get()
-  list(@Query('tabId') tabId: string) {
-    return this.namingMemoryService.list(tabId);
+  list(@Query('tabId') tabId: string, @Query('field') field?: string) {
+    return this.namingMemoryService.list(tabId, field);
   }
 
   // 「ファイル名へ反映」押下時に呼ばれる。ユーザーが直した表記を次回以降に引き継ぐ。

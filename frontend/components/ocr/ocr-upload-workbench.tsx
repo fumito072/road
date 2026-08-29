@@ -62,6 +62,10 @@ type EditableFileResult = {
   outputFileName: string;
   confidence: number;
   reason: string;
+  // AI が読んだ生の書類種別。編集しても書き換えない（学習のキーになるため）。
+  ocrDocumentType: string;
+  // 過去の修正内容が自動適用された項目かどうか。
+  documentTypeAppliedFromMemory: boolean;
 };
 
 type DestinationKind = "local" | "sharepoint";
@@ -134,6 +138,8 @@ function buildEditableFileResults(upload: UploadRecord): EditableFileResult[] {
       outputFileName: current?.outputFileName ?? file.originalFileName,
       confidence: current?.confidence ?? upload.ocrConfidence ?? 0,
       reason: current?.reason ?? "",
+      ocrDocumentType: current?.ocrDocumentType ?? current?.documentType ?? "",
+      documentTypeAppliedFromMemory: current?.documentTypeAppliedFromMemory ?? false,
     };
   });
 }
@@ -492,22 +498,47 @@ export function OcrUploadWorkbench() {
    * ocrValue には必ず「AI が読んだ生の社名」を渡すこと（自動反映後の値ではない）。
    * 適用後の値をキーにすると別エントリが増えるだけで、元の誤読が直らない。
    */
-  const recordNamingMemory = useCallback(async (): Promise<number> => {
-    if (!defaultTab) return 0;
+  const recordNamingMemory = useCallback(
+    async (files: EditableFileResult[]): Promise<number> => {
+      if (!defaultTab) return 0;
 
-    // 自動反映されたまま手を加えていない場合は、既に辞書にある内容なので送らない。
-    if (customerNameFromMemory) return 0;
+      // 自動反映されたまま手を加えていない項目は、既に辞書にある内容なので送らない。
+      const entries = [
+        ...(customerNameFromMemory
+          ? []
+          : [
+              {
+                field: "company",
+                ocrValue: ocrCustomerName,
+                confirmedValue: fileCustomerName,
+              },
+            ]),
+        // 書類種別はファイルごとに直せるので、行ごとに記録する。
+        ...files
+          .filter((file) => !file.documentTypeAppliedFromMemory)
+          .map((file) => ({
+            field: "documentType",
+            ocrValue: file.ocrDocumentType,
+            confirmedValue: file.documentType,
+          })),
+      ]
+        .map((entry) => ({
+          field: entry.field,
+          ocrValue: entry.ocrValue.trim(),
+          confirmedValue: entry.confirmedValue.trim(),
+        }))
+        .filter((entry) => entry.ocrValue && entry.confirmedValue && entry.ocrValue !== entry.confirmedValue);
 
-    const ocrValue = ocrCustomerName.trim();
-    const confirmedValue = fileCustomerName.trim();
-    if (!ocrValue || !confirmedValue || ocrValue === confirmedValue) return 0;
+      if (entries.length === 0) return 0;
 
-    const result = await apiFetch<{ learned: number }>("/naming-memory/record", {
-      method: "POST",
-      body: JSON.stringify({ tabId: defaultTab.id, entries: [{ ocrValue, confirmedValue }] }),
-    });
-    return result.learned ?? 0;
-  }, [defaultTab, customerNameFromMemory, ocrCustomerName, fileCustomerName]);
+      const result = await apiFetch<{ learned: number }>("/naming-memory/record", {
+        method: "POST",
+        body: JSON.stringify({ tabId: defaultTab.id, entries }),
+      });
+      return result.learned ?? 0;
+    },
+    [defaultTab, customerNameFromMemory, ocrCustomerName, fileCustomerName],
+  );
 
   const handleApplyFileNameTemplate = async () => {
     if (!currentUpload || isApplyingFileNames) return;
@@ -535,10 +566,10 @@ export function OcrUploadWorkbench() {
       fileNamesSaved = true;
       setCurrentUpload(savedUpload);
 
-      const learned = await recordNamingMemory();
+      const learned = await recordNamingMemory(appliedFileResults);
       setInfoMessage(
         learned > 0
-          ? "ファイル名と社名の修正を保存しました。次回から社名を自動で反映します。"
+          ? `ファイル名と、社名・書類種別の修正 ${learned} 件を保存しました。次回から自動で反映します。`
           : "社名と日付を全ファイルのファイル名へ反映し、保存しました。個別に直すこともできます。",
       );
     } catch {
@@ -939,7 +970,18 @@ export function OcrUploadWorkbench() {
                         </button>
                         <div className="mt-3 grid gap-3 sm:grid-cols-2">
                           <div>
-                            <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">書類種別</label>
+                            <label className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">
+                              書類種別
+                              {file.documentTypeAppliedFromMemory && (
+                                <span
+                                  className="inline-flex items-center gap-1 rounded-full border border-[#a7e3e8] bg-[#effcfd] px-2 py-0.5 text-[10px] font-bold normal-case tracking-normal text-[#0e7078]"
+                                  title={`AI の読み取り「${file.ocrDocumentType}」を、前回までに確定した表記へ自動で置き換えました。`}
+                                >
+                                  <Sparkles className="h-3 w-3" />
+                                  自動反映
+                                </span>
+                              )}
+                            </label>
                             <input
                               type="text"
                               value={file.documentType}
@@ -948,6 +990,8 @@ export function OcrUploadWorkbench() {
                                 setEditableFileResults((current) => current.map((item, currentIndex) => currentIndex === index ? {
                                   ...item,
                                   documentType,
+                                  // 手で直したらバッジを外す（以降はユーザー自身の値）。
+                                  documentTypeAppliedFromMemory: false,
                                   outputFileName: buildOutputFileName(fileDate, fileCustomerName, documentType),
                                 } : item));
                               }}

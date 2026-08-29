@@ -11,6 +11,7 @@ import { NamingRulesModule } from './naming-rules/naming-rules.module';
 import { MemberCheckModule } from './member-check/member-check.module';
 import { KeiriOcrModule } from './keiri-ocr/keiri-ocr.module';
 import { NamingMemoryModule } from './naming-memory/naming-memory.module';
+import { BillingOcrModule } from './billing-ocr/billing-ocr.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { NamingMemoryModule } from './naming-memory/naming-memory.module';
     MemberCheckModule,
     KeiriOcrModule,
     NamingMemoryModule,
+    BillingOcrModule,
   ],
 })
 export class AppModule {}

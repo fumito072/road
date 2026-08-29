@@ -41,6 +41,10 @@ export interface UploadFileResult {
   outputFileName?: string;
   confidence?: number;
   reason?: string;
+  /** AI が読んだ生の書類種別。学習のキーに使うので上書きしない。 */
+  ocrDocumentType?: string;
+  /** 学習辞書から書類種別を自動反映したか。 */
+  documentTypeAppliedFromMemory?: boolean;
 }
 
 export interface DestinationCandidate {

@@ -61,6 +61,24 @@ export interface AccountingExtractResult {
   raw: Record<string, unknown>;
 }
 
+export interface BillingFileResult {
+  originalFileName: string;
+  /** 請求先（宛名）の顧客名。法人格は含めない。 */
+  customerName: string;
+  /** 明細の種類（請求明細・利用明細など）。 */
+  statementType: string;
+  /** 請求元の事業者名（東京電力・NTT など）。 */
+  carrier: string;
+  /** 請求日・発行日・利用月のいずれか（YYYYMMDD）。 */
+  date: string;
+}
+
+export interface BillingExtractResult {
+  fileResults: BillingFileResult[];
+  confidence: number;
+  raw: Record<string, unknown>;
+}
+
 type GeminiGenerateResult = {
   model: string;
   raw: Record<string, unknown>;
@@ -346,6 +364,97 @@ export class OcrService {
       confidence: this.asNumber(parsed.confidence) ?? 0.6,
       raw,
     };
+  }
+
+  /**
+   * 請求明細用: 請求先の顧客名・明細の種類・請求元（キャリア）・日付を抽出する。
+   * ファイル名は「日付_顧客名_明細の種類（キャリア名）」を想定（組み立ては呼び出し側）。
+   */
+  async extractBillingStatements(
+    files: Array<{
+      storagePath?: string;
+      buffer?: Buffer;
+      mimeType: string;
+      originalFileName: string;
+    }>,
+  ): Promise<BillingExtractResult> {
+    const apiKey = this.config.get<string>('GEMINI_API_KEY');
+    const model = this.config.get<string>('GEMINI_MODEL') ?? 'gemini-2.5-flash';
+    const fallbackModels = this.parseModelList(
+      this.config.get<string>('GEMINI_FALLBACK_MODELS') ?? 'gemini-2.5-flash-lite',
+    );
+
+    if (!apiKey) {
+      throw new BadRequestException('GEMINI_API_KEY is not configured');
+    }
+
+    const parts: Array<Record<string, unknown>> = [{ text: this.buildBillingPrompt(files) }];
+    for (const file of files) {
+      if (!file.buffer && !file.storagePath) {
+        throw new BadRequestException('No image provided for billing extraction');
+      }
+      const buffer = file.buffer ?? (await this.loadFileBuffer(file.storagePath as string));
+      parts.push({ text: `File name: ${file.originalFileName}` });
+      parts.push({
+        inline_data: {
+          mime_type: this.resolveMimeType(file.mimeType, file.originalFileName),
+          data: buffer.toString('base64'),
+        },
+      });
+    }
+
+    const { raw } = await this.generateContentWithFallback(apiKey, [model, ...fallbackModels], parts);
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = this.parseStructuredJson(this.extractText(raw));
+    } catch (err) {
+      this.logger.error('Failed to parse Gemini billing response', err as Error);
+      throw new InternalServerErrorException(
+        '請求明細の読み取り結果を解析できませんでした。ファイルを確認して再実行してください。',
+      );
+    }
+
+    const rawList = Array.isArray(parsed.fileResults) ? parsed.fileResults : [];
+    const fileResults: BillingFileResult[] = files.map((file, index) => {
+      const candidate = (rawList[index] ?? {}) as Record<string, unknown>;
+      return {
+        originalFileName: file.originalFileName,
+        // 法人格はファイル名に入れない（経理OCRと同じ扱い）。
+        customerName: this.stripCompanyDesignators(
+          this.sanitizeCompanyName(this.asString(candidate.customerName) ?? ''),
+        ),
+        statementType: this.sanitizeCompanyName(this.asString(candidate.statementType) ?? '請求明細'),
+        carrier: this.sanitizeCompanyName(this.asString(candidate.carrier) ?? ''),
+        date: this.normalizeDocumentDate(candidate.date),
+      };
+    });
+
+    return {
+      fileResults,
+      confidence: this.asNumber(parsed.confidence) ?? 0.6,
+      raw,
+    };
+  }
+
+  private buildBillingPrompt(files: Array<{ originalFileName: string }>): string {
+    const fileNames = files.map((file, index) => `${index + 1}. ${file.originalFileName}`).join('\n');
+    return [
+      'あなたは通信・電力などの請求明細を読み取るOCRシステムです。',
+      'アップロードされた各ファイル（1ファイル＝1書類）について、以下を抽出してください。',
+      '- customerName: 請求先（宛名）の顧客名。個人名でも会社名でもよい。',
+      '  重要: 「株式会社」「有限会社」「合同会社」「（株）」「㈱」などの法人格は含めないでください。例: 「株式会社ロード」→「ロード」。',
+      '- carrier: 請求元の事業者名（例: 東京電力、関西電力、NTT東日本、NTTドコモ、KDDI、ソフトバンク）。請求書を発行している会社です。',
+      '  正式名称が長い場合でも、書類上で最も目立つ事業者名を簡潔に返してください（例:「東京電力エナジーパートナー株式会社」→「東京電力」）。',
+      '- statementType: 明細の種類。書類の表題から判断する（例: 請求明細、利用明細、ご請求内訳）。判別できなければ「請求明細」。',
+      '- date: 請求日・発行日・利用月のいずれか（その書類を代表する日付）を YYYYMMDD で。',
+      '  利用月のみで日が無い場合はその月の1日にする。令和/平成は西暦に変換。読み取れなければ空文字。',
+      'fileResults は入力ファイルと同じ件数・同じ順番で返してください。',
+      '出力は有効なJSONのみ。スキーマ:',
+      '{"fileResults":[{"originalFileName":"","customerName":"","carrier":"","statementType":"","date":""}],"confidence":0.0}',
+      'Files:',
+      fileNames,
+    ].join('\n');
   }
 
   private buildAccountingPrompt(

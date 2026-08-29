@@ -43,25 +43,27 @@ declare global {
   }
 }
 
-type KeiriScanFile = {
+type BillingScanFile = {
   originalFileName: string;
-  company: string;
-  amount: string;
+  customerName: string;
+  statementType: string;
+  carrier: string;
   date: string;
-  documentType: string;
   suggestedName: string;
-  ocrCompany: string;
-  ocrDocumentType: string;
+  ocrCustomerName: string;
+  ocrStatementType: string;
+  ocrCarrier: string;
   appliedFromMemory: boolean;
-  documentTypeAppliedFromMemory: boolean;
+  statementTypeAppliedFromMemory: boolean;
+  carrierAppliedFromMemory: boolean;
 };
 
-type KeiriScanResult = {
-  files: KeiriScanFile[];
+type BillingScanResult = {
+  files: BillingScanFile[];
   confidence: number;
 };
 
-type KeiriRow = {
+type BillingRow = {
   id: string;
   file: File;
   // uploads に保存された正規のファイル名（＝File.name）。SharePoint リネームのキーにも使う。
@@ -69,15 +71,17 @@ type KeiriRow = {
   // uploads 上のファイルID（プレビュー取得に使う）。
   fileId: string | null;
   date: string;
-  company: string;
-  amount: string;
-  documentType: string;
+  customerName: string;
+  statementType: string;
+  carrier: string;
   // AI が読んだ生の値。編集しても書き換えない（学習のキーになるため）。
-  ocrCompany: string;
-  ocrDocumentType: string;
+  ocrCustomerName: string;
+  ocrStatementType: string;
+  ocrCarrier: string;
   // 過去の修正内容が自動適用された項目かどうか。
   appliedFromMemory: boolean;
-  documentTypeAppliedFromMemory: boolean;
+  statementTypeAppliedFromMemory: boolean;
+  carrierAppliedFromMemory: boolean;
   // 「ファイル名へ反映」で確定した保存ファイル名。
   outputFileName: string;
 };
@@ -98,12 +102,19 @@ function sanitizeSegment(value: string) {
   return value.trim().replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
-// 命名規則: 購入日_会社名_金額（拡張子は元ファイル維持）
-function buildKeiriName(row: Pick<KeiriRow, "date" | "company" | "amount" | "originalFileName">) {
-  const base = [row.date, row.company, row.amount]
-    .map(sanitizeSegment)
+// 命名規則: 日付_顧客名_明細の種類（キャリア名）。拡張子は元ファイル維持。
+// 例: 20260826_ロード_請求明細（東京電力）.pdf
+function buildBillingName(
+  row: Pick<BillingRow, "date" | "customerName" | "statementType" | "carrier" | "originalFileName">,
+) {
+  const carrier = sanitizeSegment(row.carrier);
+  const statement = sanitizeSegment(row.statementType);
+  const statementWithCarrier = carrier ? `${statement}（${carrier}）` : statement;
+
+  const base = [sanitizeSegment(row.date), sanitizeSegment(row.customerName), statementWithCarrier]
     .filter(Boolean)
     .join("_");
+
   return base ? `${base}${fileExtension(row.originalFileName)}` : row.originalFileName;
 }
 
@@ -121,12 +132,12 @@ function folderDisplayName(path: string) {
   return segments[segments.length - 1] ?? path;
 }
 
-export function KeiriOcrWorkbench() {
+export function BillingOcrWorkbench() {
   const [defaultTab, setDefaultTab] = useState<Tab | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
 
   const [queue, setQueue] = useState<{ id: string; file: File }[]>([]);
-  const [rows, setRows] = useState<KeiriRow[]>([]);
+  const [rows, setRows] = useState<BillingRow[]>([]);
   const [currentUpload, setCurrentUpload] = useState<UploadRecord | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [isApplyingFileNames, setIsApplyingFileNames] = useState(false);
@@ -197,45 +208,47 @@ export function KeiriOcrWorkbench() {
     setInfo(null);
     setLocalSaveNotice(null);
     try {
-      // ① uploads にファイルを保存（SharePoint 保存・プレビューに必要）＋ ② 経理OCRで抽出。
+      // ① uploads にファイルを保存（SharePoint 保存・プレビューに必要）＋ ② 請求明細OCRで抽出。
       const intakeForm = new FormData();
       intakeForm.append("tabId", defaultTab.id);
-      intakeForm.append("folderName", buildFolderName("経理OCR"));
+      intakeForm.append("folderName", buildFolderName("請求明細OCR"));
       queue.forEach((item) => intakeForm.append("files", item.file));
 
       const scanForm = new FormData();
-      // tabId は学習辞書（過去に直した取引先名）を引くために渡す。
+      // tabId は学習辞書（過去に直した顧客名）を引くために渡す。
       scanForm.append("tabId", defaultTab.id);
       queue.forEach((item) => scanForm.append("files", item.file));
 
       const [createdUpload, scan] = await Promise.all([
         apiFetch<UploadRecord>("/uploads/intake", { method: "POST", body: intakeForm }),
-        apiFetch<KeiriScanResult>("/keiri-ocr/scan", { method: "POST", body: scanForm }),
+        apiFetch<BillingScanResult>("/billing-ocr/scan", { method: "POST", body: scanForm }),
       ]);
 
       // scan は入力と同じ順序で返る。uploads の保存名は文字化け修正済みで File.name と一致する。
-      const nextRows: KeiriRow[] = queue.map((item, index) => {
+      const nextRows: BillingRow[] = queue.map((item, index) => {
         const uploadFile =
           createdUpload.files.find((f) => f.originalFileName === item.file.name) ??
           createdUpload.files[index];
         const s = scan.files[index];
-        const row: Omit<KeiriRow, "outputFileName"> = {
+        const row: Omit<BillingRow, "outputFileName"> = {
           id: uploadFile?.id ?? item.id,
           file: item.file,
           originalFileName: uploadFile?.originalFileName ?? item.file.name,
           fileId: uploadFile?.id ?? null,
           date: s?.date ?? "",
-          company: s?.company ?? "",
-          amount: s?.amount ?? "",
-          documentType: s?.documentType ?? "",
-          ocrCompany: s?.ocrCompany ?? s?.company ?? "",
-          ocrDocumentType: s?.ocrDocumentType ?? s?.documentType ?? "",
+          customerName: s?.customerName ?? "",
+          statementType: s?.statementType ?? "請求明細",
+          carrier: s?.carrier ?? "",
+          ocrCustomerName: s?.ocrCustomerName ?? s?.customerName ?? "",
+          ocrStatementType: s?.ocrStatementType ?? s?.statementType ?? "",
+          ocrCarrier: s?.ocrCarrier ?? s?.carrier ?? "",
           appliedFromMemory: s?.appliedFromMemory ?? false,
-          documentTypeAppliedFromMemory: s?.documentTypeAppliedFromMemory ?? false,
+          statementTypeAppliedFromMemory: s?.statementTypeAppliedFromMemory ?? false,
+          carrierAppliedFromMemory: s?.carrierAppliedFromMemory ?? false,
         };
         return {
           ...row,
-          outputFileName: s?.suggestedName || buildKeiriName(row),
+          outputFileName: s?.suggestedName || buildBillingName(row),
         };
       });
 
@@ -246,8 +259,8 @@ export function KeiriOcrWorkbench() {
       setQueue([]);
       setInfo(
         appliedCount > 0
-          ? `読み取りが完了しました。${appliedCount} 件は前回までに修正いただいた会社名を自動で反映しています。`
-          : "読み取りが完了しました。日付・会社名・金額を確認し、保存先を選んでください。",
+          ? `読み取りが完了しました。${appliedCount} 件は前回までに修正いただいた顧客名を自動で反映しています。`
+          : "読み取りが完了しました。日付・顧客名・明細の種類・キャリア名を確認し、保存先を選んでください。",
       );
     } catch (err) {
       setError(
@@ -260,20 +273,23 @@ export function KeiriOcrWorkbench() {
     }
   };
 
-  const updateRow = (id: string, patch: Partial<KeiriRow>) => {
+  const updateRow = (id: string, patch: Partial<BillingRow>) => {
     setRows((current) =>
       current.map((row) => {
         if (row.id !== id) return row;
         // 手で直したら「自動反映」バッジは外す（以降はユーザー自身の値）。
-        // ocrCompany / ocrDocumentType は学習のキーなので、ここでは絶対に上書きしない。
-        const clearCompany = patch.company !== undefined && patch.company !== row.company;
-        const clearDocumentType =
-          patch.documentType !== undefined && patch.documentType !== row.documentType;
+        // ocr* は学習のキーなので、ここでは絶対に上書きしない。
+        const clearCustomer =
+          patch.customerName !== undefined && patch.customerName !== row.customerName;
+        const clearStatementType =
+          patch.statementType !== undefined && patch.statementType !== row.statementType;
+        const clearCarrier = patch.carrier !== undefined && patch.carrier !== row.carrier;
         return {
           ...row,
           ...patch,
-          ...(clearCompany ? { appliedFromMemory: false } : {}),
-          ...(clearDocumentType ? { documentTypeAppliedFromMemory: false } : {}),
+          ...(clearCustomer ? { appliedFromMemory: false } : {}),
+          ...(clearStatementType ? { statementTypeAppliedFromMemory: false } : {}),
+          ...(clearCarrier ? { carrierAppliedFromMemory: false } : {}),
         };
       }),
     );
@@ -281,7 +297,6 @@ export function KeiriOcrWorkbench() {
 
   /**
    * 読み取り済みの書類を保存対象から外す。
-   * 重複した領収証などを、保存前に一覧から取り除くために使う。
    * rows がローカル保存・SharePoint 保存の両方の対象なので、ここから消せば保存されない。
    */
   const removeRow = (id: string) => {
@@ -297,30 +312,38 @@ export function KeiriOcrWorkbench() {
   };
 
   /**
-   * 「ファイル名へ反映」が押された時に会社名の修正を記録する。
+   * 「ファイル名へ反映」が押された時に顧客名の修正を記録する。
    * 入力途中の値や打ち間違いを覚えないよう、onChange では記録しない。
    * ocrValue には必ず「AI が読んだ生の値」を渡すこと（自動適用後の値ではない）。
    */
   const recordNamingMemory = useCallback(
-    async (savedRows: KeiriRow[]): Promise<number> => {
+    async (savedRows: BillingRow[]): Promise<number> => {
       if (!defaultTab) return 0;
 
       // 自動反映されたまま手を加えていない項目は、既に辞書にある内容なので送らない。
-      // （updateRow が編集時にバッジを落とすため、true = 無修正）
       const entries = savedRows
         .flatMap((row) => [
           ...(row.appliedFromMemory
             ? []
-            : [{ field: "company", ocrValue: row.ocrCompany, confirmedValue: row.company }]),
-          ...(row.documentTypeAppliedFromMemory
+            : [
+                {
+                  field: "company",
+                  ocrValue: row.ocrCustomerName,
+                  confirmedValue: row.customerName,
+                },
+              ]),
+          ...(row.statementTypeAppliedFromMemory
             ? []
             : [
                 {
                   field: "documentType",
-                  ocrValue: row.ocrDocumentType,
-                  confirmedValue: row.documentType,
+                  ocrValue: row.ocrStatementType,
+                  confirmedValue: row.statementType,
                 },
               ]),
+          ...(row.carrierAppliedFromMemory
+            ? []
+            : [{ field: "carrier", ocrValue: row.ocrCarrier, confirmedValue: row.carrier }]),
         ])
         .map((entry) => ({
           field: entry.field,
@@ -345,7 +368,7 @@ export function KeiriOcrWorkbench() {
 
     const appliedRows = rows.map((row) => ({
       ...row,
-      outputFileName: buildKeiriName(row),
+      outputFileName: buildBillingName(row),
     }));
     setRows(appliedRows);
     setIsApplyingFileNames(true);
@@ -357,7 +380,7 @@ export function KeiriOcrWorkbench() {
       const fileResults: UploadFileResult[] = appliedRows.map((row) => ({
         originalFileName: row.originalFileName,
         outputFileName: row.outputFileName,
-        documentType: row.documentType,
+        documentType: row.statementType,
         documentDate: row.date,
       }));
       const savedUpload = await apiFetch<UploadRecord>(`/uploads/${currentUpload.id}/file-names`, {
@@ -370,13 +393,13 @@ export function KeiriOcrWorkbench() {
       const learned = await recordNamingMemory(appliedRows);
       setInfo(
         learned > 0
-          ? `ファイル名と会社名の修正 ${learned} 件を保存しました。次回から会社名を自動で反映します。`
-          : "購入日・会社名・金額を保存ファイル名へ反映し、保存しました。",
+          ? `ファイル名と顧客名の修正 ${learned} 件を保存しました。次回から顧客名を自動で反映します。`
+          : "日付・顧客名・明細の種類・キャリア名を保存ファイル名へ反映し、保存しました。",
       );
     } catch {
       setError(
         fileNamesSaved
-          ? "ファイル名は保存しましたが、会社名の修正履歴を保存できませんでした。もう一度お試しください。"
+          ? "ファイル名は保存しましたが、顧客名の修正履歴を保存できませんでした。もう一度お試しください。"
           : "ファイル名を画面へ反映しましたが、保存できませんでした。もう一度お試しください。",
       );
     } finally {
@@ -414,7 +437,7 @@ export function KeiriOcrWorkbench() {
     try {
       let saved = 0;
       for (const row of rows) {
-        const name = row.outputFileName.trim() || buildKeiriName(row);
+        const name = row.outputFileName.trim() || buildBillingName(row);
         const handle = await localDirHandle.getFileHandle(name, { create: true });
         const writable = await handle.createWritable();
         await writable.write(row.file);
@@ -425,7 +448,8 @@ export function KeiriOcrWorkbench() {
       setInfo(message);
       setLocalSaveNotice({ status: "success", message });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "ローカル保存に失敗しました。フォルダの権限を確認してください。";
+      const message =
+        err instanceof Error ? err.message : "ローカル保存に失敗しました。フォルダの権限を確認してください。";
       setError(message);
       setLocalSaveNotice({ status: "error", message });
     } finally {
@@ -470,12 +494,12 @@ export function KeiriOcrWorkbench() {
     setError(null);
     setInfo(null);
     try {
-      // 命名規則（購入日_会社名_金額）を outputFileName として渡すと、
+      // 命名規則（日付_顧客名_明細の種類（キャリア名））を outputFileName として渡すと、
       // バックエンドがこの名前でリネームして SharePoint にアップロードする。
       const fileResults: UploadFileResult[] = rows.map((row) => ({
         originalFileName: row.originalFileName,
-        outputFileName: row.outputFileName.trim() || buildKeiriName(row),
-        documentType: row.documentType,
+        outputFileName: row.outputFileName.trim() || buildBillingName(row),
+        documentType: row.statementType,
         documentDate: row.date,
       }));
 
@@ -519,14 +543,14 @@ export function KeiriOcrWorkbench() {
       <header className="border-b border-black/10 bg-[#2f2f31] text-white shadow-sm">
         <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-4 py-5 lg:flex-row lg:items-center lg:justify-between lg:px-6">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">経理OCR</h1>
+            <h1 className="text-3xl font-bold tracking-tight">請求明細OCR</h1>
             <p className="mt-2 text-sm text-white/70">
-              アップロード → 読み取り → ファイル名編集 → 任意の保存先へ直接保存。命名規則「購入日_会社名_金額」。
+              アップロード → 読み取り → ファイル名編集 → 任意の保存先へ直接保存。命名規則「日付_顧客名_明細の種類（キャリア名）」。
             </p>
           </div>
           <div className="rounded-md bg-white/10 px-3 py-2 text-sm">
             <p className="text-[11px] uppercase tracking-[0.2em] text-white/55">命名規則</p>
-            <p className="mt-1 font-semibold">購入日_会社名_金額</p>
+            <p className="mt-1 font-semibold">日付_顧客名_明細の種類（キャリア名）</p>
           </div>
         </div>
       </header>
@@ -559,7 +583,7 @@ export function KeiriOcrWorkbench() {
             <div className="border-b border-[#ecf0f4] px-6 py-5">
               <h2 className="text-2xl font-bold text-[#1f2b37]">① ファイルアップロード</h2>
               <p className="mt-2 text-sm text-[#6a7684]">
-                領収書・請求書のフォルダ／ファイルを選ぶか、ここへドラッグ&ドロップしてください。
+                請求明細のフォルダ／ファイルを選ぶか、ここへドラッグ&ドロップしてください。
               </p>
             </div>
             <div className="p-6">
@@ -661,7 +685,7 @@ export function KeiriOcrWorkbench() {
                         <p className="text-sm font-semibold text-[#334154]">③ 読み取り結果の編集</p>
                       </div>
                       <p className="mt-1 text-xs text-[#7c8795]">
-                        命名規則: 購入日_会社名_金額（拡張子は元ファイルのまま）。入力後に「ファイル名へ反映」を押すと、会社名の修正も保存されます。
+                        命名規則: 日付_顧客名_明細の種類（キャリア名）（拡張子は元ファイルのまま）。入力後に「ファイル名へ反映」を押すと、顧客名の修正も保存されます。
                       </p>
                     </div>
                     <button
@@ -695,7 +719,12 @@ export function KeiriOcrWorkbench() {
                           元ファイル: {row.originalFileName}
                         </button>
                         <div className="flex shrink-0 items-center gap-2">
-                          {/* 重複などで保存対象から外したい領収証を、保存前に一覧から取り除く。 */}
+                          {row.statementType && (
+                            <span className="rounded-full border border-[#d8e6ef] bg-[#f6fbff] px-2 py-0.5 text-[11px] font-semibold text-[#4c6478]">
+                              {row.statementType}
+                            </span>
+                          )}
+                          {/* 重複などで保存対象から外したい明細を、保存前に一覧から取り除く。 */}
                           <button
                             type="button"
                             onClick={() => removeRow(row.id)}
@@ -711,25 +740,25 @@ export function KeiriOcrWorkbench() {
                       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                         <label className="block">
                           <span className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">
-                            購入日 (YYYYMMDD)
+                            日付 (YYYYMMDD)
                           </span>
                           <div className="flex items-center gap-1.5">
                             <CalendarDays className="h-4 w-4 shrink-0 text-[#9aa7b4]" />
                             <input
                               value={row.date}
                               onChange={(e) => updateRow(row.id, { date: e.target.value })}
-                              placeholder="20260401"
+                              placeholder="20260826"
                               className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]"
                             />
                           </div>
                         </label>
                         <label className="block">
                           <span className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">
-                            会社名
+                            顧客名
                             {row.appliedFromMemory && (
                               <span
                                 className="inline-flex items-center gap-1 rounded-full border border-[#a7e3e8] bg-[#effcfd] px-2 py-0.5 text-[10px] font-bold normal-case tracking-normal text-[#0e7078]"
-                                title={`AI の読み取り「${row.ocrCompany}」を、前回までに確定した表記へ自動で置き換えました。`}
+                                title={`AI の読み取り「${row.ocrCustomerName}」を、前回までに確定した表記へ自動で置き換えました。`}
                               >
                                 <Sparkles className="h-3 w-3" />
                                 前回の修正を自動反映
@@ -737,40 +766,49 @@ export function KeiriOcrWorkbench() {
                             )}
                           </span>
                           <input
-                            value={row.company}
-                            onChange={(e) => updateRow(row.id, { company: e.target.value })}
-                            placeholder="株式会社○○"
-                            className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]"
-                          />
-                        </label>
-                        <label className="block">
-                          <span className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">
-                            金額
-                          </span>
-                          <input
-                            value={row.amount}
-                            onChange={(e) => updateRow(row.id, { amount: e.target.value })}
-                            placeholder="3300"
+                            value={row.customerName}
+                            onChange={(e) => updateRow(row.id, { customerName: e.target.value })}
+                            placeholder="ロード"
                             className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]"
                           />
                         </label>
                         <label className="block">
                           <span className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">
-                            書類種別
-                            {row.documentTypeAppliedFromMemory && (
+                            明細の種類
+                            {row.statementTypeAppliedFromMemory && (
                               <span
                                 className="inline-flex items-center gap-1 rounded-full border border-[#a7e3e8] bg-[#effcfd] px-2 py-0.5 text-[10px] font-bold normal-case tracking-normal text-[#0e7078]"
-                                title={`AI の読み取り「${row.ocrDocumentType}」を、前回までに確定した表記へ自動で置き換えました。`}
+                                title={`AI の読み取り「${row.ocrStatementType}」を、前回までに確定した表記へ自動で置き換えました。`}
                               >
                                 <Sparkles className="h-3 w-3" />
-                                前回の修正を自動反映
+                                自動反映
                               </span>
                             )}
                           </span>
                           <input
-                            value={row.documentType}
-                            onChange={(e) => updateRow(row.id, { documentType: e.target.value })}
-                            placeholder="領収書"
+                            value={row.statementType}
+                            onChange={(e) => updateRow(row.id, { statementType: e.target.value })}
+                            placeholder="請求明細"
+                            className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]"
+                          />
+                        </label>
+                        <label className="block">
+                          <span className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-[#7c8795]">
+                            キャリア名
+                            {row.carrierAppliedFromMemory && (
+                              <span
+                                className="inline-flex items-center gap-1 rounded-full border border-[#a7e3e8] bg-[#effcfd] px-2 py-0.5 text-[10px] font-bold normal-case tracking-normal text-[#0e7078]"
+                                title={`AI の読み取り「${row.ocrCarrier}」を、前回までに確定した表記へ自動で置き換えました。`}
+                              >
+                                <Sparkles className="h-3 w-3" />
+                                自動反映
+                              </span>
+                            )}
+                          </span>
+                          <input
+                            value={row.carrier}
+                            onChange={(e) => updateRow(row.id, { carrier: e.target.value })}
+                            placeholder="東京電力"
                             className="w-full rounded-sm border border-[#d5dee8] bg-white px-3 py-2 text-sm text-[#1f2b37] outline-none transition focus:border-[#44cfd8]"
                           />
                         </label>

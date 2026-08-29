@@ -6,8 +6,9 @@ import { AuthGate } from "@/components/auth/auth-gate";
 import { OcrUploadWorkbench } from "@/components/ocr/ocr-upload-workbench";
 import { MemberCheckWorkbench } from "@/components/member-check/member-check-workbench";
 import { KeiriOcrWorkbench } from "@/components/keiri/keiri-ocr-workbench";
+import { BillingOcrWorkbench } from "@/components/billing/billing-ocr-workbench";
 
-type View = "naming" | "roster" | "keiri";
+type View = "naming" | "roster" | "keiri" | "billing";
 
 export default function HomePage() {
   // 既定は「AI OCR ファイル命名」をトップ表示。上部ナビで名簿照合(Salesforce)に切り替え可能。
@@ -27,6 +28,9 @@ export default function HomePage() {
           <NavTab active={view === "keiri"} onClick={() => setView("keiri")}>
             経理OCR
           </NavTab>
+          <NavTab active={view === "billing"} onClick={() => setView("billing")}>
+            請求明細OCR
+          </NavTab>
         </div>
       </nav>
 
@@ -34,6 +38,8 @@ export default function HomePage() {
         <OcrUploadWorkbench />
       ) : view === "keiri" ? (
         <KeiriOcrWorkbench />
+      ) : view === "billing" ? (
+        <BillingOcrWorkbench />
       ) : (
         <MemberCheckWorkbench />
       )}
