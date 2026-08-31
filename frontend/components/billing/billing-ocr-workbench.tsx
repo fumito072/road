@@ -82,7 +82,8 @@ type BillingRow = {
   appliedFromMemory: boolean;
   statementTypeAppliedFromMemory: boolean;
   carrierAppliedFromMemory: boolean;
-  // 「ファイル名へ反映」で確定した保存ファイル名。
+  // 保存ファイル名。各項目の編集と同時に作り直し、「ファイル名へ反映」で
+  // サーバへ保存する（表示は常に最新の入力を反映する）。
   outputFileName: string;
 };
 
@@ -284,13 +285,15 @@ export function BillingOcrWorkbench() {
         const clearStatementType =
           patch.statementType !== undefined && patch.statementType !== row.statementType;
         const clearCarrier = patch.carrier !== undefined && patch.carrier !== row.carrier;
-        return {
+        const next = {
           ...row,
           ...patch,
           ...(clearCustomer ? { appliedFromMemory: false } : {}),
           ...(clearStatementType ? { statementTypeAppliedFromMemory: false } : {}),
           ...(clearCarrier ? { carrierAppliedFromMemory: false } : {}),
         };
+        // 入力と同時に保存ファイル名へ反映する（「ファイル名へ反映」を押す前でも表示が追従する）。
+        return { ...next, outputFileName: buildBillingName(next) };
       }),
     );
   };

@@ -78,7 +78,8 @@ type KeiriRow = {
   // 過去の修正内容が自動適用された項目かどうか。
   appliedFromMemory: boolean;
   documentTypeAppliedFromMemory: boolean;
-  // 「ファイル名へ反映」で確定した保存ファイル名。
+  // 保存ファイル名。各項目の編集と同時に作り直し、「ファイル名へ反映」で
+  // サーバへ保存する（表示は常に最新の入力を反映する）。
   outputFileName: string;
 };
 
@@ -269,12 +270,14 @@ export function KeiriOcrWorkbench() {
         const clearCompany = patch.company !== undefined && patch.company !== row.company;
         const clearDocumentType =
           patch.documentType !== undefined && patch.documentType !== row.documentType;
-        return {
+        const next = {
           ...row,
           ...patch,
           ...(clearCompany ? { appliedFromMemory: false } : {}),
           ...(clearDocumentType ? { documentTypeAppliedFromMemory: false } : {}),
         };
+        // 入力と同時に保存ファイル名へ反映する（「ファイル名へ反映」を押す前でも表示が追従する）。
+        return { ...next, outputFileName: buildKeiriName(next) };
       }),
     );
   };
