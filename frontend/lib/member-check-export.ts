@@ -40,6 +40,8 @@ export type MemberCheckResult = {
 type ExportOptions = {
   sourceFileNames?: string[];
   generatedAt?: Date;
+  /** 画面の絞り込み状態（例: 「該当のみ」）。出力が名簿全体でない場合に明記する。 */
+  filterLabel?: string;
 };
 
 type ExportStatus = "該当あり" | "複数候補" | "未登録";
@@ -150,6 +152,12 @@ export async function exportMemberCheckExcel(
   sheet.mergeCells("E2:K2");
   sheet.getCell("E2").value = options.sourceFileNames?.join(" / ") || "-";
   sheet.getCell("E2").alignment = { wrapText: true, vertical: "middle" };
+
+  // 絞り込んで出力した場合、何を出したのかが後から分かるようにしておく。
+  sheet.getCell("A3").value = "表示条件";
+  sheet.mergeCells("B3:K3");
+  sheet.getCell("B3").value = options.filterLabel || "すべて";
+  sheet.getCell("B3").alignment = { vertical: "middle" };
 
   const firstDataRow = 7;
   const lastDataRow = Math.max(firstDataRow, firstDataRow + result.people.length - 1);
@@ -412,7 +420,17 @@ export async function exportMemberCheckPdf(
       const sourceLines = wrapText(context, `対象ファイル: ${sourceFiles}`, contentWidth);
       drawTextLines(context, sourceLines, margin, 145, 26);
 
-      const cardsTop = 170 + Math.max(0, sourceLines.length - 1) * 26;
+      // 絞り込んで出力した場合、何を出したのかが後から分かるようにしておく。
+      const filterTop = 145 + sourceLines.length * 26;
+      drawTextLines(
+        context,
+        wrapText(context, `表示条件: ${options.filterLabel || "すべて"}`, contentWidth),
+        margin,
+        filterTop,
+        26,
+      );
+
+      const cardsTop = 196 + Math.max(0, sourceLines.length - 1) * 26;
       const gap = 20;
       const cardWidth = (contentWidth - gap * 2) / 3;
       const cards = [

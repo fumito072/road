@@ -56,6 +56,18 @@ function personStatus(person: MemberCheckPersonResult): PersonStatus {
   return person.salesforce.matchCount > 1 ? "multiple" : "matched";
 }
 
+/**
+ * 一覧の絞り込み。
+ * 「未登録のみ」は Salesforce へ未登録の人を洗い出す用途で、実務上いちばん使われる想定。
+ */
+type PersonFilter = "all" | "matched" | "unmatched";
+
+const filterLabel: Record<PersonFilter, string> = {
+  all: "すべて",
+  matched: "該当のみ",
+  unmatched: "未登録のみ",
+};
+
 const statusBadge: Record<PersonStatus, { label: string; className: string }> = {
   matched: { label: "該当あり", className: "border-[#bfece6] bg-[#eefdfa] text-[#1e8f88]" },
   multiple: { label: "複数候補", className: "border-[#ecd7ac] bg-[#fff9e9] text-[#8a6732]" },
@@ -67,6 +79,7 @@ export function MemberCheckWorkbench() {
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<MemberCheckResult | null>(null);
+  const [personFilter, setPersonFilter] = useState<PersonFilter>("all");
   const [exporting, setExporting] = useState<"pdf" | "excel" | null>(null);
   const [exportNotice, setExportNotice] = useState<{
     status: "success" | "error";
@@ -76,6 +89,7 @@ export function MemberCheckWorkbench() {
   const addFiles = useCallback((incoming: DroppedFile[]) => {
     setResult(null);
     setExportNotice(null);
+    setPersonFilter("all");
     setQueue((current) => [
       ...current,
       ...incoming.map((item, index) => ({
@@ -93,6 +107,7 @@ export function MemberCheckWorkbench() {
     setResult(null);
     setError(null);
     setExportNotice(null);
+    setPersonFilter("all");
   };
 
   const handleScan = useCallback(async () => {
@@ -101,6 +116,7 @@ export function MemberCheckWorkbench() {
     setError(null);
     setResult(null);
     setExportNotice(null);
+    setPersonFilter("all");
     try {
       // 1) スキャンを受付（即ジョブIDが返る）。長い処理でもここでは待たないのでタイムアウトしない。
       const form = new FormData();
@@ -141,17 +157,39 @@ export function MemberCheckWorkbench() {
     }
   }, [queue]);
 
+  const matchedPeople = result?.people.filter((p) => p.salesforce.exists) ?? [];
+  const unmatchedPeople = result?.people.filter((p) => !p.salesforce.exists) ?? [];
+  const visiblePeople =
+    personFilter === "matched" ? matchedPeople : personFilter === "unmatched" ? unmatchedPeople : result?.people ?? [];
+
   const handleExport = useCallback(
     async (format: "pdf" | "excel") => {
       if (!result || exporting) return;
       setExporting(format);
       setExportNotice(null);
       try {
-        const options = { sourceFileNames: queue.map((item) => item.file.name) };
+        // 出力は画面の絞り込みに合わせる。件数も出力した内容と一致させ、
+        // 何を絞って出したのかは「表示条件」として帳票に明記する。
+        const people =
+          personFilter === "matched"
+            ? result.people.filter((p) => p.salesforce.exists)
+            : personFilter === "unmatched"
+              ? result.people.filter((p) => !p.salesforce.exists)
+              : result.people;
+        const exported = {
+          ...result,
+          people,
+          totalPeople: people.length,
+          matchedCount: people.filter((p) => p.salesforce.exists).length,
+        };
+        const options = {
+          sourceFileNames: queue.map((item) => item.file.name),
+          filterLabel: `${filterLabel[personFilter]}（名簿全体 ${result.totalPeople}名 中 ${people.length}名）`,
+        };
         const fileName =
           format === "pdf"
-            ? await exportMemberCheckPdf(result, options)
-            : await exportMemberCheckExcel(result, options);
+            ? await exportMemberCheckPdf(exported, options)
+            : await exportMemberCheckExcel(exported, options);
         setExportNotice({
           status: "success",
           message: `${fileName} を保存しました。`,
@@ -168,7 +206,7 @@ export function MemberCheckWorkbench() {
         setExporting(null);
       }
     },
-    [exporting, queue, result],
+    [exporting, personFilter, queue, result],
   );
 
   return (
@@ -376,8 +414,38 @@ export function MemberCheckWorkbench() {
                     )}
                   </div>
 
+                  {/* 一覧の絞り込み。未登録の洗い出しが主用途になるため件数も併記する。 */}
+                  <div className="grid grid-cols-3 gap-2 rounded-sm border border-[#dbe4ec] bg-[#f7f9fb] p-1">
+                    {(
+                      [
+                        ["all", result.people.length],
+                        ["matched", matchedPeople.length],
+                        ["unmatched", unmatchedPeople.length],
+                      ] as const
+                    ).map(([key, count]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => setPersonFilter(key)}
+                        className={`inline-flex items-center justify-center gap-1.5 rounded-sm px-3 py-2 text-sm font-semibold transition ${
+                          personFilter === key
+                            ? "bg-white text-[#20303d] shadow-sm"
+                            : "text-[#667282] hover:bg-white/70"
+                        }`}
+                      >
+                        {filterLabel[key]}
+                        <span className="text-xs font-bold text-[#7c8795]">({count})</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {visiblePeople.length === 0 ? (
+                    <div className="rounded-sm border border-dashed border-[#d5dee8] bg-[#fbfcfe] px-5 py-10 text-center text-sm text-[#7c8795]">
+                      {filterLabel[personFilter]}に該当する人はいません。
+                    </div>
+                  ) : (
                   <ul className="divide-y divide-[#eef2f6] overflow-hidden rounded-sm border border-[#e7edf3]">
-                    {result.people.map((person, index) => {
+                    {visiblePeople.map((person, index) => {
                       const status = personStatus(person);
                       const badge = statusBadge[status];
                       return (
@@ -445,6 +513,7 @@ export function MemberCheckWorkbench() {
                       );
                     })}
                   </ul>
+                  )}
                 </div>
               )}
             </div>
