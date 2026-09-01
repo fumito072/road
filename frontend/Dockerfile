@@ -21,6 +21,9 @@ ENV HOSTNAME=0.0.0.0
 
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
+# standalone 出力に public/ は含まれないため明示的に持ち込む。
+# ここが無いと /pdfjs/pdf.worker.min.js が 404 になり、PDFの分割ができなくなる。
+COPY --from=builder /app/public ./public
 
 EXPOSE 3000
 CMD ["node", "server.js"]
