@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api";
+import { splitRosterFile } from "@/lib/roster-split";
 import { UploadDropzone } from "@/components/common/upload-dropzone";
 import { formatBytes, type DroppedFile } from "@/lib/file-drop";
 import {
@@ -41,9 +42,11 @@ type QueueItem = {
   relativePath: string;
 };
 
-// ポーリング設定: 2.5秒間隔 × 最大120回 ≒ 5分まで待つ。
+// ポーリング設定: 2.5秒間隔 × 最大240回 ≒ 10分まで待つ。
+// 300名規模だと読み取り（ファイルごとに逐次）＋Salesforce照合で5分を超えることがあるため。
+// サーバー側のジョブ保持は30分なので、この範囲なら結果を取りこぼさない。
 const POLL_INTERVAL_MS = 2500;
-const POLL_MAX_ATTEMPTS = 120;
+const POLL_MAX_ATTEMPTS = 240;
 
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -80,6 +83,7 @@ export function MemberCheckWorkbench() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<MemberCheckResult | null>(null);
   const [personFilter, setPersonFilter] = useState<PersonFilter>("all");
+  const [splitNotice, setSplitNotice] = useState<string | null>(null);
   const [exporting, setExporting] = useState<"pdf" | "excel" | null>(null);
   const [exportNotice, setExportNotice] = useState<{
     status: "success" | "error";
@@ -108,6 +112,7 @@ export function MemberCheckWorkbench() {
     setError(null);
     setExportNotice(null);
     setPersonFilter("all");
+    setSplitNotice(null);
   };
 
   const handleScan = useCallback(async () => {
@@ -118,9 +123,25 @@ export function MemberCheckWorkbench() {
     setExportNotice(null);
     setPersonFilter("all");
     try {
+      // 0) 1枚に人数を詰め込みすぎるとAIが読み切れず破綻するため、事前に分割して渡す。
+      //    分割枚数ぶんAPI呼び出しが増えるが、サーバ側が全ファイルの人物をまとめてくれる。
+      setSplitNotice(null);
+      const prepared: File[] = [];
+      let splitFrom = 0;
+      for (const item of queue) {
+        const { files, didSplit } = await splitRosterFile(item.file);
+        if (didSplit) splitFrom += 1;
+        prepared.push(...files);
+      }
+      if (splitFrom > 0) {
+        setSplitNotice(
+          `読み取り精度を上げるため、${splitFrom} 件のファイルを ${prepared.length} 枚に分割して読み取ります。`,
+        );
+      }
+
       // 1) スキャンを受付（即ジョブIDが返る）。長い処理でもここでは待たないのでタイムアウトしない。
       const form = new FormData();
-      queue.forEach((item) => form.append("files", item.file));
+      prepared.forEach((file) => form.append("files", file));
       const ack = await apiFetch<ScanJobAck>("/member-check/scan", {
         method: "POST",
         body: form,
@@ -142,7 +163,7 @@ export function MemberCheckWorkbench() {
 
       if (!finalResult) {
         throw new Error(
-          "照合に時間がかかっています。ファイルを分割して人数を減らすか、少し時間を置いて再実行してください。",
+          "照合が10分以内に終わりませんでした。1ファイルあたりの人数を100〜150名程度に分割して再実行してください。（サーバー側の処理は続いている場合があります）",
         );
       }
       setResult(finalResult);
@@ -325,6 +346,13 @@ export function MemberCheckWorkbench() {
                 </div>
               )}
 
+              {splitNotice && (
+                <div className="flex items-start gap-2 rounded-sm border border-[#cfeaf0] bg-[#f7feff] px-4 py-3 text-sm text-[#2f7f8a]">
+                  <RefreshCw className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{splitNotice}</span>
+                </div>
+              )}
+
               {isScanning && (
                 <div className="flex min-h-[220px] flex-col items-center justify-center rounded-sm border border-dashed border-[#cfeaf0] bg-[#f7feff] text-center text-sm text-[#3a8f99]">
                   <RefreshCw className="mb-3 h-8 w-8 animate-spin text-[#44cfd8]" />
@@ -350,6 +378,25 @@ export function MemberCheckWorkbench() {
                       </p>
                     </div>
                   </div>
+
+                  {((result.removedDuplicates ?? 0) > 0 || (result.duplicateWarningCount ?? 0) > 0) && (
+                    <div className="flex items-start gap-2 rounded-sm border border-[#ecd7ac] bg-[#fff9e9] px-4 py-3 text-sm text-[#8a6732]">
+                      <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                      <div>
+                        {(result.removedDuplicates ?? 0) > 0 && (
+                          <p>
+                            同じ内容の重複を {result.removedDuplicates} 件除きました（同じページを二重に読み取った場合などに発生します）。
+                          </p>
+                        )}
+                        {(result.duplicateWarningCount ?? 0) > 0 && (
+                          <p className={(result.removedDuplicates ?? 0) > 0 ? "mt-1" : ""}>
+                            氏名が重複している方が {result.duplicateWarningCount} 名います。読み取り間違いの可能性があるため、
+                            「要確認」の行を原本と照らし合わせてください（同姓同名であればそのままで問題ありません）。
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                   {!result.salesforceConfigured && (
                     <div className="flex items-start gap-2 rounded-sm border border-[#ecd7ac] bg-[#fff9e9] px-4 py-3 text-sm text-[#8a6732]">
@@ -448,6 +495,16 @@ export function MemberCheckWorkbench() {
                     {visiblePeople.map((person, index) => {
                       const status = personStatus(person);
                       const badge = statusBadge[status];
+                      // 同じ氏名が複数ある行。誤読か同姓同名かはシステムでは判断できないため印だけ付ける。
+                      const duplicateBadge = person.duplicateWarning ? (
+                        <span
+                          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[#ecd7ac] bg-[#fff9e9] px-2 py-0.5 text-[11px] font-bold text-[#8a6732]"
+                          title="同じ氏名の方が他にもいます。読み取り間違いの可能性があるため原本をご確認ください。"
+                        >
+                          <CircleAlert className="h-3 w-3" />
+                          要確認
+                        </span>
+                      ) : null;
                       return (
                         <li key={index} className="bg-white px-4 py-3">
                           <div className="flex items-start justify-between gap-3">
@@ -470,13 +527,16 @@ export function MemberCheckWorkbench() {
                                   .join(" ・ ")}
                               </p>
                             </div>
-                            <span
-                              className={`shrink-0 rounded-full border px-3 py-1 text-xs font-bold ${badge.className}`}
-                            >
-                              {status === "matched" && (
-                                <CheckCircle2 className="mr-1 inline h-3.5 w-3.5 align-[-2px]" />
-                              )}
-                              {badge.label}
+                            <span className="flex shrink-0 items-center gap-2">
+                              {duplicateBadge}
+                              <span
+                                className={`rounded-full border px-3 py-1 text-xs font-bold ${badge.className}`}
+                              >
+                                {status === "matched" && (
+                                  <CheckCircle2 className="mr-1 inline h-3.5 w-3.5 align-[-2px]" />
+                                )}
+                                {badge.label}
+                              </span>
                             </span>
                           </div>
 

@@ -45,6 +45,10 @@ export interface PeopleListResult {
   people: ExtractedPerson[];
   confidence: number;
   raw: Record<string, unknown>;
+  /** 応答が途中で切れ、読めた分だけを救出した場合に true。件数が不足している可能性がある。 */
+  truncated: boolean;
+  /** モデルが同じ人物を生成し続ける異常（繰り返しループ）を検知して再試行した回数。 */
+  retriedForRepetition: number;
 }
 
 export interface AccountingFileResult {
@@ -83,6 +87,14 @@ type GeminiGenerateResult = {
   model: string;
   raw: Record<string, unknown>;
 };
+
+/** 名簿読み取りの再試行回数（繰り返しループ・応答切断の検知時）。 */
+const PEOPLE_LIST_MAX_ATTEMPTS = 3;
+/**
+ * 同一氏名がこの件数以上あれば繰り返しループとみなす。
+ * 正常な名簿で同姓同名が5人並ぶことは実務上ないため、誤検知の心配は小さい。
+ */
+const PEOPLE_LIST_REPETITION_THRESHOLD = 5;
 
 @Injectable()
 export class OcrService {
@@ -203,23 +215,119 @@ export class OcrService {
       },
     ];
 
-    const { raw } = await this.generateContentWithFallback(apiKey, [model, ...fallbackModels], parts);
+    // 名簿のように同じ形式の行が続く画像では、モデルが同じ人物を生成し続けて
+    // 出力上限まで走り、JSON が途中で切れることがある（実測: 同一氏名を954回）。
+    // 毎回起きるわけではないので、異常を検知したら作り直させる。
+    let lastAttempt: { people: ExtractedPerson[]; confidence: number; raw: Record<string, unknown>; truncated: boolean } | null = null;
 
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = this.parseStructuredJson(this.extractText(raw));
-    } catch (err) {
-      this.logger.error('Failed to parse Gemini people-list response', err as Error);
-      throw new InternalServerErrorException(
-        '名簿の読み取り結果を解析できませんでした。画像を確認して再実行してください。',
-      );
+    for (let attempt = 1; attempt <= PEOPLE_LIST_MAX_ATTEMPTS; attempt += 1) {
+      const { raw } = await this.generateContentWithFallback(apiKey, [model, ...fallbackModels], parts);
+      const text = this.extractPeopleListText(raw);
+
+      let people: ExtractedPerson[];
+      let confidence: number;
+      let truncated = false;
+
+      try {
+        const parsed = this.parseStructuredJson(text);
+        people = this.normalizePeople(parsed);
+        confidence = this.asNumber(parsed.confidence) ?? 0.6;
+      } catch {
+        // 途中で切れた JSON からでも、完結しているレコードだけは取り出せる。
+        people = this.salvagePeopleFromTruncatedJson(text);
+        confidence = 0.4;
+        truncated = true;
+        this.logger.warn(
+          `People-list response was truncated (attempt ${attempt}/${PEOPLE_LIST_MAX_ATTEMPTS}, ` +
+            `text=${text.length} chars, salvaged=${people.length} people)`,
+        );
+      }
+
+      const repetition = this.detectRepetition(people);
+      if (!repetition && !truncated) {
+        return { people, confidence, raw, truncated: false, retriedForRepetition: attempt - 1 };
+      }
+
+      if (repetition) {
+        this.logger.warn(
+          `People-list response looks like a repetition loop ` +
+            `(attempt ${attempt}/${PEOPLE_LIST_MAX_ATTEMPTS}, ${repetition.count} copies of "${repetition.name}" ` +
+            `out of ${people.length} records)`,
+        );
+        // 壊れた結果は採用しない。健全な過去の結果があればそちらを残す。
+        if (!lastAttempt) {
+          lastAttempt = { people: [], confidence: 0, raw, truncated };
+        }
+      } else {
+        lastAttempt = { people, confidence, raw, truncated };
+      }
     }
 
-    return {
-      people: this.normalizePeople(parsed),
-      confidence: this.asNumber(parsed.confidence) ?? 0.6,
-      raw,
-    };
+    if (lastAttempt && lastAttempt.people.length > 0) {
+      return { ...lastAttempt, retriedForRepetition: PEOPLE_LIST_MAX_ATTEMPTS - 1 };
+    }
+
+    this.logger.error(
+      `People-list extraction failed after ${PEOPLE_LIST_MAX_ATTEMPTS} attempts (repetition loop / truncation)`,
+    );
+    throw new InternalServerErrorException(
+      '名簿の読み取りに失敗しました（AIの応答が異常でした）。もう一度実行するか、' +
+        '1ファイルあたりの人数を減らして分割してお試しください。',
+    );
+  }
+
+  /** 応答からテキスト部分を取り出す。空でも例外にせず、後段で救出・再試行させる。 */
+  private extractPeopleListText(raw: Record<string, unknown>): string {
+    const candidates = raw.candidates as Array<Record<string, unknown>> | undefined;
+    const content = candidates?.[0]?.content as Record<string, unknown> | undefined;
+    const parts = content?.parts as Array<Record<string, unknown>> | undefined;
+    return (parts ?? [])
+      .map((part) => (typeof part.text === 'string' ? part.text : ''))
+      .join('')
+      .trim();
+  }
+
+  /**
+   * 同じ人物が繰り返し出力されていないか判定する。
+   * 正常な名簿で同一氏名が数件を超えることはまずないため、閾値を超えたら異常とみなす。
+   */
+  private detectRepetition(people: ExtractedPerson[]): { name: string; count: number } | null {
+    const counts = new Map<string, number>();
+    for (const person of people) {
+      const key = `${person.lastName}${person.firstName}`.trim() || person.fullName.trim();
+      if (!key) continue;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+
+    for (const [name, count] of counts) {
+      if (count >= PEOPLE_LIST_REPETITION_THRESHOLD) {
+        return { name, count };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 途中で切れた JSON から、閉じ括弧まで揃っているレコードだけを拾う。
+   * 全滅させるより、読めた分を返して不足を警告する方が実務上ましなため。
+   */
+  private salvagePeopleFromTruncatedJson(text: string): ExtractedPerson[] {
+    const objects = text.match(/\{[^{}]*\}/g) ?? [];
+    const people: Record<string, unknown>[] = [];
+
+    for (const chunk of objects) {
+      try {
+        const parsed = JSON.parse(chunk) as Record<string, unknown>;
+        // people 配列の要素だけを拾う（confidence だけの断片などは除く）。
+        if ('lastName' in parsed || 'fullName' in parsed) {
+          people.push(parsed);
+        }
+      } catch {
+        // 壊れた断片は捨てる
+      }
+    }
+
+    return this.normalizePeople({ people });
   }
 
   private buildPeopleListPrompt(): string {

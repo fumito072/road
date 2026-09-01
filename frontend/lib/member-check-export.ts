@@ -27,6 +27,8 @@ export type MemberCheckPersonResult = {
   handicap: string;
   note: string;
   salesforce: MemberCheckSalesforce;
+  /** 同じ氏名の人が複数いる。OCR の誤読か同姓同名かは原本で要確認。 */
+  duplicateWarning?: boolean;
 };
 
 export type MemberCheckResult = {
@@ -34,6 +36,10 @@ export type MemberCheckResult = {
   matchedCount: number;
   confidence: number;
   salesforceConfigured: boolean;
+  /** 全項目が同一で自動除去した件数。 */
+  removedDuplicates?: number;
+  /** 氏名が重複していて確認が必要な人数。 */
+  duplicateWarningCount?: number;
   people: MemberCheckPersonResult[];
 };
 
