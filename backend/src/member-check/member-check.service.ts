@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { randomUUID } from 'node:crypto';
 import { ExtractedPerson, OcrService } from '../ocr/ocr.service';
 import { SalesforcePersonSearchResult, SalesforceService } from '../salesforce/salesforce.service';
+import { normalizeJapaneseName } from '../salesforce/japanese-name';
 
 type UploadedImage = {
   originalname: string;
@@ -218,9 +219,10 @@ export class MemberCheckService {
   }
 
   /** 氏名だけの照合キー。fullName は表記ゆれが出るので姓名から組み立てる。 */
-  private nameKey(person: ExtractedPerson): string {
+  private nameKey(person: ExtractedPerson, foldVariants = true): string {
     const name = `${this.norm(person.lastName)}${this.norm(person.firstName)}`;
-    return name || this.norm(person.fullName);
+    const key = name || this.norm(person.fullName);
+    return foldVariants ? normalizeJapaneseName(key) : key;
   }
 
   /**
@@ -238,7 +240,8 @@ export class MemberCheckService {
 
     for (const person of people) {
       const key = [
-        this.nameKey(person),
+        // 異体字の違いだけで人物を自動削除せず、重複警告の対象にする。
+        this.nameKey(person, false),
         this.norm(person.kana),
         this.norm(person.group),
         this.norm(person.handicap),

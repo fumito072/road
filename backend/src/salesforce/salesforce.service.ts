@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { japaneseNameLikePatterns, normalizeJapaneseName } from './japanese-name';
 
 export interface SalesforceContactMatch {
   id: string;
@@ -52,6 +53,11 @@ interface CachedToken {
   accessToken: string;
   instanceUrl: string;
   expiresAt: number;
+}
+
+interface QueryPage {
+  records: Record<string, unknown>[];
+  nextRecordsUrl?: string;
 }
 
 const SALESFORCE_API_VERSION = 'v59.0';
@@ -137,19 +143,25 @@ export class SalesforceService {
   }
 
   private async runQuery(soql: string): Promise<Record<string, unknown>[]> {
+    return (await this.runQueryPage(soql)).records;
+  }
+
+  private async runQueryPage(soql: string, nextRecordsUrl?: string): Promise<QueryPage> {
     let token = await this.getToken();
     const buildUrl = (t: CachedToken) =>
-      `${t.instanceUrl}/services/data/${SALESFORCE_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
+      nextRecordsUrl
+        ? `${t.instanceUrl}${nextRecordsUrl}`
+        : `${t.instanceUrl}/services/data/${SALESFORCE_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
 
     let response = await fetch(buildUrl(token), {
-      headers: { Authorization: `Bearer ${token.accessToken}` },
+      headers: { Authorization: `Bearer ${token.accessToken}`, 'Sforce-Query-Options': 'batchSize=200' },
     });
 
     // Token may have been revoked/expired server-side — refresh once and retry.
     if (response.status === 401) {
       token = await this.getToken(true);
       response = await fetch(buildUrl(token), {
-        headers: { Authorization: `Bearer ${token.accessToken}` },
+        headers: { Authorization: `Bearer ${token.accessToken}`, 'Sforce-Query-Options': 'batchSize=200' },
       });
     }
 
@@ -162,7 +174,28 @@ export class SalesforceService {
       throw new Error(`Salesforce query failed (${response.status}): ${detail}`);
     }
 
-    return (data.records as Record<string, unknown>[]) ?? [];
+    return {
+      records: (data.records as Record<string, unknown>[]) ?? [],
+      nextRecordsUrl: data.nextRecordsUrl as string | undefined,
+    };
+  }
+
+  /** 広めの LIKE 検索の結果を再照合し、該当する10件までページをたどる。 */
+  private async runPersonQuery(
+    soql: string,
+    accepts: (record: Record<string, unknown>) => boolean,
+  ): Promise<Record<string, unknown>[]> {
+    const matches: Record<string, unknown>[] = [];
+    let nextRecordsUrl: string | undefined;
+    do {
+      const page = await this.runQueryPage(soql, nextRecordsUrl);
+      for (const record of page.records) {
+        if (accepts(record)) matches.push(record);
+        if (matches.length === 10) return matches;
+      }
+      nextRecordsUrl = page.nextRecordsUrl;
+    } while (nextRecordsUrl);
+    return matches;
   }
 
   /**
@@ -220,7 +253,6 @@ export class SalesforceService {
   async searchPeople(input: PersonQuery): Promise<SalesforcePersonSearchResult> {
     let lastName = (input.lastName ?? '').trim();
     let firstName = (input.firstName ?? '').trim();
-    const kana = (input.kana ?? '').trim();
     const fullName = (input.fullName ?? '').trim();
 
     // fullName しか無い場合は空白で姓名を分割する。
@@ -235,7 +267,7 @@ export class SalesforceService {
     if (!this.isConfigured()) {
       return { configured: false, query: displayQuery, lastName, firstName, exists: false, matchCount: 0, matches: [] };
     }
-    if (!lastName && !firstName) {
+    if (!normalizeJapaneseName(lastName) && !normalizeJapaneseName(firstName)) {
       return { configured: true, query: displayQuery, lastName, firstName, exists: false, matchCount: 0, matches: [] };
     }
 
@@ -245,8 +277,10 @@ export class SalesforceService {
     // 1) 顧客担当者 (Contact)
     const contactWhere = this.buildContactNameWhere(lastName, firstName);
     if (contactWhere) {
-      const soql = `SELECT Id, Name, Account.Name FROM Contact WHERE ${contactWhere} ORDER BY Name LIMIT 10`;
-      const records = await this.runQuery(soql);
+      const soql = `SELECT Id, Name, Account.Name FROM Contact WHERE ${contactWhere} ORDER BY Name`;
+      const records = await this.runPersonQuery(soql, (record) =>
+        this.nameIncludes(record.Name, lastName) && this.nameIncludes(record.Name, firstName),
+      );
       for (const record of records) {
         const account = record.Account as { Name?: string } | null | undefined;
         const id = (record.Id as string) ?? '';
@@ -265,13 +299,21 @@ export class SalesforceService {
     // 2) 取引先担当者 (独自 a0m)
     const customWhere = this.buildCustomContactNameWhere(lastName, firstName);
     if (customWhere) {
-      const soql = `SELECT Id, sei__c, name__c, furigana__c, torihikisaki_name__c FROM ${CUSTOM_CONTACT_OBJECT} WHERE ${customWhere} LIMIT 10`;
-      const records = await this.runQuery(soql);
+      const soql = `SELECT Id, sei__c, name__c, furigana__c, torihikisaki_name__c FROM ${CUSTOM_CONTACT_OBJECT} WHERE ${customWhere}`;
+      const records = await this.runPersonQuery(soql, (record) => {
+        if (normalizeJapaneseName(lastName) && normalizeJapaneseName(firstName)) {
+          return this.nameIncludes(record.sei__c, lastName) && this.nameIncludes(record.name__c, firstName);
+        }
+        if (normalizeJapaneseName(lastName)) {
+          return this.nameIncludes(record.sei__c, lastName) || this.nameIncludes(record.name__c, lastName);
+        }
+        return this.nameIncludes(record.name__c, firstName);
+      });
       for (const record of records) {
         const sei = (record.sei__c as string) ?? '';
         const namae = (record.name__c as string) ?? '';
         // name__c には「姓　名」全体が入っていることが多いので、そのまま表示名にする。
-        const display = (namae.includes(sei) || !sei ? namae : `${sei} ${namae}`).trim();
+        const display = (this.nameIncludes(namae, sei) || !sei ? namae : `${sei} ${namae}`).trim();
         const id = (record.Id as string) ?? '';
         matches.push({
           source: 'torihikisaki_tantou',
@@ -298,24 +340,30 @@ export class SalesforceService {
 
   /** Contact.Name 用の WHERE 句（姓 AND 名 / 片方のみは部分一致）。 */
   private buildContactNameWhere(lastName: string, firstName: string): string {
-    const conditions: string[] = [];
-    if (lastName) conditions.push(`Name LIKE '%${this.escapeSoql(lastName)}%'`);
-    if (firstName) conditions.push(`Name LIKE '%${this.escapeSoql(firstName)}%'`);
-    return conditions.join(' AND ');
+    return [this.nameWhere('Name', lastName), this.nameWhere('Name', firstName)]
+      .filter(Boolean).join(' AND ');
   }
 
   /** 取引先担当者(独自) 用の WHERE 句。姓のみのときは sei__c/name__c の両方を見る。 */
   private buildCustomContactNameWhere(lastName: string, firstName: string): string {
-    if (lastName && firstName) {
-      return `sei__c LIKE '%${this.escapeSoql(lastName)}%' AND name__c LIKE '%${this.escapeSoql(firstName)}%'`;
+    const last = this.nameWhere('sei__c', lastName);
+    const first = this.nameWhere('name__c', firstName);
+    if (last && first) {
+      return `${last} AND ${first}`;
     }
-    if (lastName) {
-      const s = this.escapeSoql(lastName);
-      return `(sei__c LIKE '%${s}%' OR name__c LIKE '%${s}%')`;
+    if (last) {
+      return `(${last} OR ${this.nameWhere('name__c', lastName)})`;
     }
-    if (firstName) {
-      return `name__c LIKE '%${this.escapeSoql(firstName)}%'`;
-    }
-    return '';
+    return first;
+  }
+
+  private nameWhere(field: string, value: string): string {
+    const patterns = japaneseNameLikePatterns(value);
+    return patterns.length ? `(${patterns.map((pattern) => `${field} LIKE '${pattern}'`).join(' OR ')})` : '';
+  }
+
+  private nameIncludes(value: unknown, query: string): boolean {
+    return normalizeJapaneseName(typeof value === 'string' ? value : '')
+      .includes(normalizeJapaneseName(query));
   }
 }
